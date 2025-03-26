@@ -72,6 +72,7 @@
 
 #include "Admin.hpp"
 #include "Auth.hpp"
+#include "CacheUtil.hpp"
 #include "FileServer.hpp"
 #include "UserMessages.hpp"
 #include <wsd/RemoteConfig.hpp>
@@ -170,8 +171,11 @@ static std::mutex NewChildrenMutex;
 static std::condition_variable NewChildrenCV;
 static std::vector<std::shared_ptr<ChildProcess> > NewChildren;
 
-static std::chrono::steady_clock::time_point LastForkRequestTime = std::chrono::steady_clock::now();
-static std::atomic<int> OutstandingForks(0);
+static std::atomic<int> TotalOutstandingForks(0);
+std::map<std::string, int> OutstandingForks;
+std::map<std::string, std::chrono::steady_clock::time_point> LastForkRequestTimes;
+std::map<std::string, std::shared_ptr<ForKitProcess>> SubForKitProcs;
+std::map<std::string, std::chrono::steady_clock::time_point> LastSubForKitBrokerExitTimes;
 std::map<std::string, std::shared_ptr<DocumentBroker>> DocBrokers;
 std::mutex DocBrokersMutex;
 static Poco::AutoPtr<Poco::Util::XMLConfiguration> KitXmlConfig;
@@ -188,7 +192,8 @@ static std::chrono::milliseconds careerSpanMs(std::chrono::milliseconds::zero())
 #endif
 
 /// The timeout for a child to spawn, initially high, then reset to the default.
-int ChildSpawnTimeoutMs = CHILD_SPAWN_TIMEOUT_MS;
+std::atomic<std::chrono::milliseconds> ChildSpawnTimeoutMs =
+    std::chrono::milliseconds(CHILD_SPAWN_TIMEOUT_MS);
 std::atomic<unsigned> COOLWSD::NumConnections;
 std::unordered_set<std::string> COOLWSD::EditFileExtensions;
 
@@ -235,11 +240,11 @@ std::string removeProtocolAndPort(const std::string& host)
         result = host;
 
     // port
-    pos = result.find(":");
+    pos = result.find(':');
     if (pos != std::string::npos)
     {
         if (pos == 0)
-            return "";
+            return std::string();
 
         result = result.substr(0, pos);
     }
@@ -299,7 +304,7 @@ void COOLWSD::appendAllowedAliasGroups(LayeredConfiguration& conf, std::vector<s
             if (!alias.empty())
             {
                 LOG_INF_S("Adding trusted LOK_ALLOW alias: [" << alias << ']');
-                allowed.push_back(alias);
+                allowed.push_back(std::move(alias));
             }
         }
     }
@@ -325,6 +330,26 @@ void COOLWSD::alertAllUsersInternal(const std::string& msg)
         docBroker->addCallback([msg, docBroker](){ docBroker->alertAllUsers(msg); });
     }
 }
+
+#if !MOBILEAPP
+void COOLWSD::syncUsersBrowserSettings(const std::string& userId, const pid_t childPid, const std::string& json)
+{
+    if constexpr (Util::isMobileApp())
+        return;
+    std::lock_guard<std::mutex> docBrokersLock(DocBrokersMutex);
+
+    LOG_INF("Syncing browsersettings for all the users");
+
+    for (auto& brokerIt : DocBrokers)
+    {
+        std::shared_ptr<DocumentBroker> docBroker = brokerIt.second;
+        if (docBroker->getPid() == childPid)
+            continue;
+        docBroker->addCallback([userId, json, docBroker]()
+                               { docBroker->syncBrowserSettings(userId, json); });
+    }
+}
+#endif
 
 void COOLWSD::alertUserInternal(const std::string& dockey, const std::string& msg)
 {
@@ -409,6 +434,11 @@ void cleanupDocBrokers()
     Util::assertIsLocked(DocBrokersMutex);
 
     const size_t count = DocBrokers.size();
+
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+
+    std::set<std::string> activeConfigs;
+
     for (auto it = DocBrokers.begin(); it != DocBrokers.end(); )
     {
         std::shared_ptr<DocumentBroker> docBroker = it->second;
@@ -416,11 +446,13 @@ void cleanupDocBrokers()
         // Remove only when not alive.
         if (!docBroker->isAlive())
         {
+            LastSubForKitBrokerExitTimes[docBroker->getConfigId()] = now;
             LOG_INF("Removing DocumentBroker for docKey [" << it->first << "].");
             docBroker->dispose();
             it = DocBrokers.erase(it);
             continue;
         } else {
+            activeConfigs.insert(docBroker->getConfigId());
             ++it;
         }
     }
@@ -430,11 +462,42 @@ void cleanupDocBrokers()
         LOG_TRC("Have " << DocBrokers.size() << " DocBrokers after cleanup" <<
                 [&](auto& log)
                 {
-                    for (auto& pair : DocBrokers)
+                    int i = 1;
+                    for (const auto& pair : DocBrokers)
                     {
-                        log << "\nDocumentBroker [" << pair.first << ']';
+                        log << "\nDocumentBroker #" << i++ << " [" << pair.first << ']';
                     }
                 });
+
+        CONFIG_STATIC const std::size_t IdleServerSettingsTimeoutSecs =
+            ConfigUtil::getConfigValue<int>("serverside_config.idle_timeout_secs", 3600);
+
+        // consider shutting down unused subforkits
+        for (auto it = SubForKitProcs.begin(); it != SubForKitProcs.end(); )
+        {
+            // copy as it will be used after erase()
+            std::string configId = it->first;
+
+            if (configId.empty()) {
+                // ignore primordial forkit
+                ++it;
+            } else if (activeConfigs.contains(configId)) {
+                LOG_DBG("subforkit " << configId << " has active document, keep it");
+                ++it;
+            } else if (OutstandingForks[configId] > 0) {
+                LOG_DBG("subforkit " << configId << " has a pending fork underway, keep it");
+                ++it;
+            } else if (now - LastSubForKitBrokerExitTimes[configId] < std::chrono::seconds(IdleServerSettingsTimeoutSecs)) {
+                LOG_DBG("subforkit " << configId << " recently used, keep it");
+                ++it;
+            } else {
+                LOG_DBG("subforkit " << configId << " is unused, dropping it");
+                LastSubForKitBrokerExitTimes.erase(configId);
+                OutstandingForks.erase(configId);
+                it = SubForKitProcs.erase(it);
+                UnitWSD::get().killSubForKit(configId);
+            }
+        }
 
 #if !MOBILEAPP && ENABLE_DEBUG
         if (COOLWSD::SingleKit && DocBrokers.empty())
@@ -449,7 +512,7 @@ void cleanupDocBrokers()
 #if !MOBILEAPP
 
 /// Forks as many children as requested.
-static void forkChildren(const int number)
+static void forkChildren(const std::string& configId, const int number)
 {
     if (Util::isKitInProcess())
         return;
@@ -463,10 +526,37 @@ static void forkChildren(const int number)
 
         const std::string message = "spawn " + std::to_string(number) + '\n';
         LOG_DBG("MasterToForKit: " << message.substr(0, message.length() - 1));
-        COOLWSD::sendMessageToForKit(message);
-        OutstandingForks += number;
-        LastForkRequestTime = std::chrono::steady_clock::now();
+
+        if (COOLWSD::sendMessageToForKit(message, configId))
+        {
+            TotalOutstandingForks += number;
+            OutstandingForks[configId] += number;
+            LastForkRequestTimes[configId] = std::chrono::steady_clock::now();
+        }
     }
+}
+
+bool COOLWSD::ensureSubForKit(const std::string& configId)
+{
+    if (Util::isKitInProcess())
+        return false;
+
+    LOG_TRC("Request forkit to spawn subForKit " << configId);
+
+    auto it = SubForKitProcs.find(configId);
+    if (it != SubForKitProcs.end())
+    {
+        LOG_TRC("subForKit " << configId << " already running");
+        return false;
+    }
+
+    COOLWSD::checkDiskSpaceAndWarnClients(false);
+
+    const std::string aMessage = "addforkit " + configId + '\n';
+    LOG_DBG("MasterToForKit: " << aMessage.substr(0, aMessage.length() - 1));
+    COOLWSD::sendMessageToForKit(aMessage);
+
+    return true;
 }
 
 /// Cleans up dead children.
@@ -496,38 +586,45 @@ static bool cleanupChildren()
 }
 
 /// Decides how many children need spawning and spawns.
-static void rebalanceChildren(int balance)
+static void rebalanceChildren(const std::string& configId, int balance)
 {
     Util::assertIsLocked(NewChildrenMutex);
 
-    const size_t available = NewChildren.size();
+    size_t available = 0;
+    for (const auto& elem : NewChildren)
+    {
+        if (elem->getConfigId() == configId)
+            ++available;
+    }
+
     LOG_TRC("Rebalance children to " << balance << ", have " << available << " and "
-                                     << OutstandingForks << " outstanding requests");
+                                     << OutstandingForks[configId] << " outstanding requests");
 
     // Do the cleanup first.
     const bool rebalance = cleanupChildren();
 
-    const auto duration = (std::chrono::steady_clock::now() - LastForkRequestTime);
+    const auto duration = (std::chrono::steady_clock::now() - LastForkRequestTimes[configId]);
     const auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
-    if (OutstandingForks != 0 && durationMs >= std::chrono::milliseconds(ChildSpawnTimeoutMs))
+    if (OutstandingForks[configId] != 0 && durationMs >= ChildSpawnTimeoutMs.load())
     {
         // Children taking too long to spawn.
         // Forget we had requested any, and request anew.
-        LOG_WRN("ForKit not responsive for " << durationMs << " forking " << OutstandingForks
+        LOG_WRN("ForKit not responsive for " << durationMs << " forking " << OutstandingForks[configId]
                                              << " children. Resetting.");
-        OutstandingForks = 0;
+        TotalOutstandingForks -= OutstandingForks[configId];
+        OutstandingForks[configId] = 0;
     }
 
     balance -= available;
-    balance -= OutstandingForks;
+    balance -= OutstandingForks[configId];
 
-    if (balance > 0 && (rebalance || OutstandingForks == 0))
+    if (balance > 0 && (rebalance || OutstandingForks[configId] == 0))
     {
         LOG_DBG("prespawnChildren: Have " << available << " spare "
                                           << (available == 1 ? "child" : "children") << ", and "
-                                          << OutstandingForks << " outstanding, forking " << balance
+                                          << OutstandingForks[configId] << " outstanding, forking " << balance
                                           << " more. Time since last request: " << durationMs);
-        forkChildren(balance);
+        forkChildren(configId, balance);
     }
 }
 
@@ -538,7 +635,9 @@ static void prespawnChildren()
     // Rebalance if not forking already.
     std::unique_lock<std::mutex> lock(NewChildrenMutex, std::defer_lock);
     if (lock.try_lock())
-        rebalanceChildren(COOLWSD::NumPreSpawnedChildren);
+    {
+        rebalanceChildren("", COOLWSD::NumPreSpawnedChildren);
+    }
 }
 
 #endif
@@ -547,22 +646,29 @@ static size_t addNewChild(std::shared_ptr<ChildProcess> child)
 {
     assert(child && "Adding null child");
     const auto pid = child->getPid();
+    const std::string& configId = child->getConfigId();
 
     std::unique_lock<std::mutex> lock(NewChildrenMutex);
 
-    --OutstandingForks;
+    --TotalOutstandingForks;
+    --OutstandingForks[configId];
     // Prevent from going -ve if we have unexpected children.
-    if (OutstandingForks < 0)
-        ++OutstandingForks;
+    if (OutstandingForks[configId] < 0)
+    {
+        ++TotalOutstandingForks;
+        ++OutstandingForks[configId];
+    }
 
     if (COOLWSD::IsBindMountingEnabled)
     {
         // Reset the child-spawn timeout to the default, now that we're set.
         // But only when mounting is enabled. Otherwise, copying is always slow.
-        ChildSpawnTimeoutMs = CHILD_TIMEOUT_MS;
+        ChildSpawnTimeoutMs = std::chrono::milliseconds(CHILD_TIMEOUT_MS);
     }
 
-    LOG_TRC("Adding a new child " << pid << " to NewChildren, have " << OutstandingForks
+    LOG_TRC("Adding a new child " << pid << " with config " << configId
+                                  << " to NewChildren, have "
+                                  << OutstandingForks[configId]
                                   << " outstanding requests");
     SigUtil::addActivity("added child " + std::to_string(pid));
     NewChildren.emplace_back(std::move(child));
@@ -595,7 +701,7 @@ inline std::string getLaunchBase(bool asAdmin = false)
         auto passwd = ConfigUtil::getConfigValue<std::string>("admin_console.password", "");
 
         if (user.empty() || passwd.empty())
-            return "";
+            return std::string();
 
         oss << user << ':' << passwd << '@';
     }
@@ -666,7 +772,6 @@ std::string COOLWSD::ServerName;
 std::string COOLWSD::FileServerRoot;
 std::string COOLWSD::ServiceRoot;
 std::string COOLWSD::TmpFontDir;
-std::string COOLWSD::TmpPresntTemplateDir;
 std::string COOLWSD::LOKitVersion;
 std::string COOLWSD::ConfigFile = COOLWSD_CONFIGDIR "/coolwsd.xml";
 std::string COOLWSD::ConfigDir = COOLWSD_CONFIGDIR "/conf.d";
@@ -729,12 +834,13 @@ public:
         _forKitProc = forKitProc;
     }
 
-    void sendMessageToForKit(const std::string& msg)
+    void sendMessageToForKit(const std::string& msg,
+                             const std::weak_ptr<ForKitProcess>& proc)
     {
         if (std::this_thread::get_id() == getThreadOwner())
         {
             // Speed up sending the message if the request comes from owner thread
-            std::shared_ptr<ForKitProcess> forKitProc = _forKitProc.lock();
+            std::shared_ptr<ForKitProcess> forKitProc = proc.lock();
             if (forKitProc)
             {
                 forKitProc->sendTextFrame(msg);
@@ -745,14 +851,19 @@ public:
             // Put the message in the owner's thread queue to be send later
             // because WebSocketHandler is not thread safe and otherwise we
             // should synchronize inside WebSocketHandler.
-            addCallback([this, msg]{
-                std::shared_ptr<ForKitProcess> forKitProc = _forKitProc.lock();
+            addCallback([proc, msg]{
+                std::shared_ptr<ForKitProcess> forKitProc = proc.lock();
                 if (forKitProc)
                 {
                     forKitProc->sendTextFrame(msg);
                 }
             });
         }
+    }
+
+    void sendMessageToForKit(const std::string& msg)
+    {
+        sendMessageToForKit(msg, _forKitProc);
     }
 
 private:
@@ -770,7 +881,8 @@ std::mutex COOLWSD::lokit_main_mutex;
 #endif
 #endif
 
-std::shared_ptr<ChildProcess> getNewChild_Blocks(SocketPoll &destPoll, unsigned mobileAppDocId)
+std::shared_ptr<ChildProcess> getNewChild_Blocks(SocketPoll &destPoll, const std::string& configId,
+                                                 unsigned mobileAppDocId)
 {
     (void)mobileAppDocId;
     const auto startTime = std::chrono::steady_clock::now();
@@ -780,12 +892,23 @@ std::shared_ptr<ChildProcess> getNewChild_Blocks(SocketPoll &destPoll, unsigned 
 #if !MOBILEAPP
     assert(mobileAppDocId == 0 && "Unexpected to have mobileAppDocId in the non-mobile build");
 
-    int numPreSpawn = COOLWSD::NumPreSpawnedChildren;
-    ++numPreSpawn; // Replace the one we'll dispatch just now.
-    LOG_DBG("getNewChild: Rebalancing children to " << numPreSpawn);
-    rebalanceChildren(numPreSpawn);
+    std::chrono::milliseconds spawnTimeoutMs = ChildSpawnTimeoutMs.load() / 2;
 
-    const auto timeout = std::chrono::milliseconds(ChildSpawnTimeoutMs / 2);
+    if (configId.empty() || SubForKitProcs.contains(configId))
+    {
+        int numPreSpawn = COOLWSD::NumPreSpawnedChildren;
+        ++numPreSpawn; // Replace the one we'll dispatch just now.
+        LOG_DBG("getNewChild: Rebalancing children of config[" << configId << "] to " << numPreSpawn);
+        rebalanceChildren(configId, numPreSpawn);
+    }
+    else
+    {
+        // configId exists, and no SubForKitProcs for it seen yet, be more generous for startup time.
+        spawnTimeoutMs = std::chrono::milliseconds(CHILD_SPAWN_TIMEOUT_MS);
+        LOG_DBG("getNewChild: awaiting subforkit[" << configId << "], timeout of " << spawnTimeoutMs << "ms");
+    }
+
+    const std::chrono::milliseconds timeout = spawnTimeoutMs;
     LOG_TRC("Waiting for a new child for a max of " << timeout);
 #else // MOBILEAPP
     const auto timeout = std::chrono::hours(100);
@@ -813,10 +936,21 @@ std::shared_ptr<ChildProcess> getNewChild_Blocks(SocketPoll &destPoll, unsigned 
     // If we fail fast and return, the next document will spawn more children without knowing
     // there are some on the way already. And if the system is slow already, that wouldn't help.
     LOG_TRC("Waiting for NewChildrenCV");
-    if (NewChildrenCV.wait_for(lock, timeout, []()
+    if (NewChildrenCV.wait_for(lock, timeout, [configId]()
                                {
                                    LOG_TRC("Predicate for NewChildrenCV wait: NewChildren.size()=" << NewChildren.size());
-                                   return !NewChildren.empty();
+
+                                   // find a candidate with matching configId
+                                   auto found =
+                                       std::find_if(NewChildren.begin(), NewChildren.end(), [configId](auto candidate)->bool {
+                                           return candidate->getConfigId() == configId;
+                                       });
+
+                                   const bool candidateMatch = found != NewChildren.end();
+                                   // move this candidate into the last position
+                                   if (candidateMatch)
+                                        std::swap(*found, NewChildren.back());
+                                   return candidateMatch;
                                }))
     {
         LOG_TRC("NewChildrenCV wait successful");
@@ -886,8 +1020,8 @@ public:
     bool watch(std::string configFile);
 
 private:
-    bool m_stopOnConfigChange;
     int m_watchedCount = 0;
+    bool m_stopOnConfigChange;
 };
 
 bool InotifySocket::watch(const std::string configFile)
@@ -1141,10 +1275,11 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
     // Initialize the config subsystem.
     LayeredConfiguration& conf = config();
 
-    const std::map<std::string, std::string> DefAppConfig = ConfigUtil::getDefaultAppConfig();
+    const std::unordered_map<std::string, std::string> defAppConfig =
+        ConfigUtil::getDefaultAppConfig();
 
     // Set default values, in case they are missing from the config file.
-    Poco::AutoPtr<ConfigUtil::AppConfigMap> defConfig(new ConfigUtil::AppConfigMap(DefAppConfig));
+    Poco::AutoPtr<ConfigUtil::AppConfigMap> defConfig(new ConfigUtil::AppConfigMap(defAppConfig));
     conf.addWriteable(defConfig, PRIO_SYSTEM); // Lowest priority
 
 #if !MOBILEAPP
@@ -1242,24 +1377,24 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
 
     const auto logToFile = ConfigUtil::getConfigValue<bool>(conf, "logging.file[@enable]", false);
     std::map<std::string, std::string> logProperties;
-    for (std::size_t i = 0; ; ++i)
-    {
-        const std::string confPath = "logging.file.property[" + std::to_string(i) + ']';
-        const std::string confName = config().getString(confPath + "[@name]", "");
-        if (!confName.empty())
-        {
-            const std::string value = config().getString(confPath, "");
-            logProperties.emplace(confName, value);
-        }
-        else if (!config().has(confPath))
-        {
-            break;
-        }
-    }
-
-    // Setup the logfile envar for the kit processes.
     if (logToFile)
     {
+        for (std::size_t i = 0;; ++i)
+        {
+            const std::string confPath = "logging.file.property[" + std::to_string(i) + ']';
+            const std::string confName = config().getString(confPath + "[@name]", "");
+            if (!confName.empty())
+            {
+                const std::string value = config().getString(confPath, "");
+                logProperties.emplace(confName, value);
+            }
+            else if (!config().has(confPath))
+            {
+                break;
+            }
+        }
+
+        // Setup the logfile envar for the kit processes.
         const auto it = logProperties.find("path");
         if (it != logProperties.end())
         {
@@ -1271,26 +1406,27 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
     }
 
     // Do the same for ui command logging
-    const auto logToFileUICmd = ConfigUtil::getConfigValue<bool>(conf, "logging_ui_cmd.file[@enable]", false);
+    const bool logToFileUICmd =
+        ConfigUtil::getConfigValue<bool>(conf, "logging_ui_cmd.file[@enable]", false);
     std::map<std::string, std::string> logPropertiesUICmd;
-    for (std::size_t i = 0; ; ++i)
-    {
-        const std::string confPath = "logging_ui_cmd.file.property[" + std::to_string(i) + ']';
-        const std::string confName = config().getString(confPath + "[@name]", "");
-        if (!confName.empty())
-        {
-            const std::string value = config().getString(confPath, "");
-            logPropertiesUICmd.emplace(confName, value);
-        }
-        else if (!config().has(confPath))
-        {
-            break;
-        }
-    }
-
-    // Setup the logfile envar for the kit processes.
     if (logToFileUICmd)
     {
+        for (std::size_t i = 0;; ++i)
+        {
+            const std::string confPath = "logging_ui_cmd.file.property[" + std::to_string(i) + ']';
+            const std::string confName = config().getString(confPath + "[@name]", "");
+            if (!confName.empty())
+            {
+                const std::string value = config().getString(confPath, "");
+                logPropertiesUICmd.emplace(confName, value);
+            }
+            else if (!config().has(confPath))
+            {
+                break;
+            }
+        }
+
+        // Setup the logfile envar for the kit processes.
         const auto it = logPropertiesUICmd.find("path");
         if (it != logPropertiesUICmd.end())
         {
@@ -1384,7 +1520,6 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
     if (ConfigUtil::hasProperty("storage.wopi.reuse_cookies"))
         LOG_WRN("NOTE: Deprecated config option storage.wopi.reuse_cookies is no longer supported");
 
-#if !MOBILEAPP
     COOLWSD::WASMState = ConfigUtil::getConfigValue<bool>(conf, "wasm.enable", false)
                              ? COOLWSD::WASMActivationState::Enabled
                              : COOLWSD::WASMActivationState::Disabled;
@@ -1404,7 +1539,6 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
         COOLWSD::WASMState = COOLWSD::WASMActivationState::Forced;
     }
 #endif
-#endif // !MOBILEAPP
 
     // Get anonymization settings.
 #if COOLWSD_ANONYMIZE_USER_DATA
@@ -1515,7 +1649,7 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
     // Core >= 7.1.
     setenv("LOK_ALLOWLIST_LANGUAGES", allowedLanguages.c_str(), 1);
 
-#endif
+#endif // !MOBILEAPP
 
     int pdfResolution =
         ConfigUtil::getConfigValue<int>(conf, "per_document.pdf_resolution_dpi", 96);
@@ -1581,7 +1715,7 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
 
     // Copy and serialize the config into XML to pass to forkit.
     KitXmlConfig.reset(new Poco::Util::XMLConfiguration);
-    for (const auto& pair : DefAppConfig)
+    for (const auto& pair : defAppConfig)
     {
         try
         {
@@ -1683,6 +1817,34 @@ void COOLWSD::innerInitialize(Poco::Util::Application& self)
     else
     {
         LOG_INF("Quarantine is disabled in config");
+    }
+
+    {
+        // creating cache directory
+        std::string path = Util::trimmed(ConfigUtil::getPathFromConfig("cache_files.path"));
+        LOG_INF("Cache path is set to [" << path << "] in config");
+        if (path.empty())
+        {
+            LOG_WRN("No cache path is set in cache_files.path. Disabling cache");
+        }
+        else
+        {
+            Poco::File p(path);
+            try
+            {
+                LOG_TRC("Creating cache directory [" + path << ']');
+                p.createDirectories();
+
+                LOG_DBG("Created cache directory [" + path << ']');
+            }
+            catch (const std::exception& ex)
+            {
+                LOG_WRN("Failed to create cache directory [" << path << "]");
+            }
+
+            if (FileUtil::Stat(path).exists())
+                Cache::initialize(path);
+        }
     }
 
     NumPreSpawnedChildren = ConfigUtil::getConfigValue<int>(conf, "num_prespawn_children", 1);
@@ -2513,7 +2675,7 @@ void PrisonPoll::wakeupHook()
 #if !MOBILEAPP
     LOG_TRC("PrisonerPoll - wakes up with " << NewChildren.size() <<
             " new children and " << DocBrokers.size() << " brokers and " <<
-            OutstandingForks << " kits forking");
+            TotalOutstandingForks << " kits forking");
 
     if (!COOLWSD::checkAndRestoreForKit())
     {
@@ -2539,7 +2701,7 @@ bool COOLWSD::createForKit()
     SigUtil::addActivity("spawning new forkit");
 
     // Creating a new forkit is always a slow process.
-    ChildSpawnTimeoutMs = CHILD_SPAWN_TIMEOUT_MS;
+    ChildSpawnTimeoutMs = std::chrono::milliseconds(CHILD_SPAWN_TIMEOUT_MS);
 
     std::unique_lock<std::mutex> newChildrenLock(NewChildrenMutex);
 
@@ -2648,12 +2810,15 @@ bool COOLWSD::createForKit()
     ForKitProc = nullptr;
     PrisonerPoll->setForKitProcess(ForKitProc);
 
+    const std::string defaultConfigId;
+
     // ForKit always spawns one.
-    ++OutstandingForks;
+    ++TotalOutstandingForks;
+    ++OutstandingForks[defaultConfigId];
 
     LOG_INF("Launching forkit process: " << forKitPath << ' ' << args.cat(' ', 0));
 
-    LastForkRequestTime = std::chrono::steady_clock::now();
+    LastForkRequestTimes[defaultConfigId] = std::chrono::steady_clock::now();
     int child = createForkit(forKitPath, args);
     ForKitProcId = child;
 
@@ -2662,19 +2827,32 @@ bool COOLWSD::createForKit()
     // Init the Admin manager
     Admin::instance().setForKitPid(ForKitProcId);
 
-    const int balance = COOLWSD::NumPreSpawnedChildren - OutstandingForks;
+    const int balance = COOLWSD::NumPreSpawnedChildren - OutstandingForks[defaultConfigId];
     if (balance > 0)
-        rebalanceChildren(balance);
+        rebalanceChildren(defaultConfigId, balance);
 
     return ForKitProcId != -1;
 }
 
-void COOLWSD::sendMessageToForKit(const std::string& message)
+bool COOLWSD::sendMessageToForKit(const std::string& message, const std::string& configId)
 {
-    if (PrisonerPoll)
+    if (!PrisonerPoll)
+        return false;
+
+    if (configId.empty())
     {
         PrisonerPoll->sendMessageToForKit(message);
+        return true;
     }
+
+    auto it = SubForKitProcs.find(configId);
+    if (it == SubForKitProcs.end())
+    {
+        LOG_WRN("subforkit: " << configId << " doesn't exist yet, dropping message: " << message);
+        return false;
+    }
+    PrisonerPoll->sendMessageToForKit(message, it->second);
+    return true;
 }
 
 #endif // !MOBILEAPP
@@ -2748,14 +2926,18 @@ private:
         {
             LOG_WRN("Unassociated Kit (" << _pid << ") disconnected unexpectedly");
 
+            std::string configId;
             std::unique_lock<std::mutex> lock(NewChildrenMutex);
             auto it = std::find(NewChildren.begin(), NewChildren.end(), child);
             if (it != NewChildren.end())
+            {
+                configId = (*it)->getConfigId();
                 NewChildren.erase(it);
+            }
             else
                 LOG_WRN("Unknown Kit process closed with pid " << (child ? child->getPid() : -1));
 #if !MOBILEAPP
-            rebalanceChildren(COOLWSD::NumPreSpawnedChildren);
+            rebalanceChildren(configId, COOLWSD::NumPreSpawnedChildren);
 #endif
         }
     }
@@ -2813,22 +2995,49 @@ private:
 
         try
         {
+            std::string jailId;
+            std::string configId;
 #if !MOBILEAPP
             LOG_TRC("Child connection with URI [" << COOLWSD::anonymizeUrl(request.getUrl())
                                                   << ']');
             Poco::URI requestURI(request.getUrl());
             if (requestURI.getPath() == FORKIT_URI)
             {
-                if (socket->getPid() != COOLWSD::ForKitProcId)
+                // New ForKit is spawned.
+                const Poco::URI::QueryParameters params = requestURI.getQueryParameters();
+                const int pid = socket->getPid();
+                for (const auto& param : params)
                 {
-                    LOG_WRN("Connection request received on "
-                            << FORKIT_URI << " endpoint from unexpected ForKit process. Skipped");
-                    return;
+                    if (param.first == "configid")
+                        configId = param.second;
                 }
-                COOLWSD::ForKitProc = std::make_shared<ForKitProcess>(COOLWSD::ForKitProcId, socket, request);
-                LOG_ASSERT_MSG(socket->getInBuffer().empty(), "Unexpected data in prisoner socket");
-                socket->getInBuffer().clear();
-                PrisonerPoll->setForKitProcess(COOLWSD::ForKitProc);
+
+                if (configId.empty()) // primordial forkit
+                {
+                    if (pid != COOLWSD::ForKitProcId)
+                    {
+                        LOG_WRN("Connection request received on "
+                                << FORKIT_URI << " endpoint from unexpected ForKit process. Skipped");
+                        return;
+                    }
+                    COOLWSD::ForKitProc = std::make_shared<ForKitProcess>(COOLWSD::ForKitProcId, socket, request);
+                    LOG_ASSERT_MSG(socket->getInBuffer().empty(), "Unexpected data in prisoner socket");
+                    socket->getInBuffer().clear();
+                    PrisonerPoll->setForKitProcess(COOLWSD::ForKitProc);
+                }
+                else
+                {
+                    LOG_INF("subforkit [" << configId << "], seen as created.");
+                    SubForKitProcs[configId] = std::make_shared<ForKitProcess>(pid, socket, request);
+                    LOG_ASSERT_MSG(socket->getInBuffer().empty(), "Unexpected data in prisoner socket");
+                    socket->getInBuffer().clear();
+                    // created subforkit for a reason, create spare early
+                    std::unique_lock<std::mutex> lock(NewChildrenMutex);
+                    rebalanceChildren(configId, COOLWSD::NumPreSpawnedChildren);
+
+                    UnitWSD::get().newSubForKit(SubForKitProcs[configId], configId);
+                }
+
                 return;
             }
             if (requestURI.getPath() != NEW_CHILD_URI)
@@ -2837,19 +3046,19 @@ private:
                 return;
             }
 
-            const auto duration = (std::chrono::steady_clock::now() - LastForkRequestTime);
+            const auto duration = (std::chrono::steady_clock::now() - LastForkRequestTimes[configId]);
             const auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
             LOG_TRC("New child spawned after " << durationMs << " of requesting");
 
             // New Child is spawned.
             const Poco::URI::QueryParameters params = requestURI.getQueryParameters();
             const int pid = socket->getPid();
-            std::string jailId;
             for (const auto& param : params)
             {
                 if (param.first == "jailid")
                     jailId = param.second;
-
+                else if (param.first == "configid")
+                    configId = param.second;
                 else if (param.first == "version")
                     COOLWSD::LOKitVersion = param.second;
             }
@@ -2871,15 +3080,15 @@ private:
             LOG_ASSERT_MSG(socket->getInBuffer().empty(), "Unexpected data in prisoner socket");
             socket->getInBuffer().clear();
 
-            LOG_INF("New child [" << pid << "], jailId: " << jailId);
+            LOG_INF("New child [" << pid << "], jailId: " << jailId << ", configId: " << configId);
 #else
             pid_t pid = 100;
-            std::string jailId = "jail";
+            jailId = "jail";
             socket->getInBuffer().clear();
 #endif
             LOG_TRC("Calling make_shared<ChildProcess>, for NewChildren?");
 
-            auto child = std::make_shared<ChildProcess>(pid, jailId, socket, request);
+            auto child = std::make_shared<ChildProcess>(pid, jailId, configId, socket, request);
 
             if constexpr (!Util::isMobileApp())
                 UnitWSD::get().newChild(child);
@@ -3083,6 +3292,7 @@ public:
         std::string version, hash;
         Util::getVersionInfo(version, hash);
 
+        THREAD_UNSAFE_DUMP_BEGIN
         os << "COOLWSDServer: " << version << " - " << hash << " state dumping"
 #if !MOBILEAPP
            << "\n  Kit version: " << COOLWSD::LOKitVersion << "\n  Ports: server "
@@ -3094,12 +3304,15 @@ public:
            << "\n  Admin: " << (COOLWSD::AdminEnabled ? "enabled" : "disabled")
            << "\n  RouteToken: " << COOLWSD::RouteToken
 #endif
+           << "\n  Uptime (seconds): " <<
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - COOLWSD::StartTime).count()
            << "\n  TerminationFlag: " << SigUtil::getTerminationFlag()
            << "\n  isShuttingDown: " << SigUtil::getShutdownRequestFlag()
            << "\n  NewChildren: " << NewChildren.size() << " (" << NewChildren.capacity() << ')'
-           << "\n  OutstandingForks: " << OutstandingForks
+           << "\n  OutstandingForks: " << TotalOutstandingForks
            << "\n  NumPreSpawnedChildren: " << COOLWSD::NumPreSpawnedChildren
-           << "\n  ChildSpawnTimeoutMs: " << ChildSpawnTimeoutMs
+           << "\n  ChildSpawnTimeoutMs: " << ChildSpawnTimeoutMs.load()
            << "\n  Document Brokers: " << DocBrokers.size()
 #if !MOBILEAPP
            << "\n  of which ConvertTo: " << ConvertToBroker::getInstanceCount()
@@ -3126,6 +3339,7 @@ public:
            << "\n  Total PSS: " << Util::getProcessTreePss(getpid()) << " KB"
            << "\n  Config: " << LoggableConfigEntries
             ;
+        THREAD_UNSAFE_DUMP_END
 
         std::string smap;
         if (const ssize_t size = FileUtil::readFile("/proc/self/smaps_rollup", smap); size <= 0)
@@ -3166,6 +3380,9 @@ public:
 
         os << '\n';
         COOLWSD::SavedClipboards->dumpState(os);
+
+        os << '\n';
+        FileServerRequestHandler::dumpState(os);
 #endif
 
         os << "\nDocument Broker polls " << "[ " << DocBrokers.size() << " ]:\n";
@@ -3300,7 +3517,7 @@ private:
 };
 
 #if !MOBILEAPP
-void COOLWSD::processFetchUpdate(SocketPoll& poll)
+void COOLWSD::processFetchUpdate(const std::shared_ptr<SocketPoll>& poll)
 {
     try
     {
@@ -3323,6 +3540,8 @@ void COOLWSD::processFetchUpdate(SocketPoll& poll)
         request.add("Accept", "application/json");
 
         FetchHttpSession->setFinishedHandler([](const std::shared_ptr<http::Session>& httpSession) {
+            httpSession->asyncShutdown();
+
             std::shared_ptr<http::Response> httpResponse = httpSession->response();
 
             FetchHttpSession.reset();
@@ -3358,7 +3577,7 @@ void COOLWSD::processFetchUpdate(SocketPoll& poll)
 #if ENABLE_DEBUG
 std::string COOLWSD::getServerURL()
 {
-    return getServiceURI(COOLWSD_TEST_COOL_UI);
+    return getServiceURI("");
 }
 #endif
 #endif
@@ -3435,8 +3654,7 @@ int COOLWSD::innerMain()
     assert(Server && "The COOLWSDServer instance does not exist.");
     Server->findClientPort();
 
-    TmpFontDir = ChildRoot + JailUtil::CHILDROOT_TMP_INCOMING_PATH + "/fonts";
-    TmpPresntTemplateDir = ChildRoot + JailUtil::CHILDROOT_TMP_INCOMING_PATH + "/templates/presnt";
+    TmpFontDir = ChildRoot + JailUtil::CHILDROOT_TMP_INCOMING_PATH;
 
     // Start the internal prisoner server and spawn forkit,
     // which in turn forks first child.
@@ -3460,7 +3678,7 @@ int COOLWSD::innerMain()
         else
         {
             int retry = (COOLWSD::NoCapsForKit ? 150 : 50);
-            const auto timeout = std::chrono::milliseconds(ChildSpawnTimeoutMs);
+            const auto timeout = ChildSpawnTimeoutMs.load();
             while (retry-- > 0 && !SigUtil::getShutdownRequestFlag())
             {
                 LOG_INF("Waiting for a new child for a max of " << timeout);
@@ -3496,45 +3714,18 @@ int COOLWSD::innerMain()
         LOG_ERR("Log level is set very high to '" << LogLevel << "' this will have a "
                 "significant performance impact. Do not use this in production.");
 
-    std::string uriConfigKey;
-    const std::string& fontConfigKey = "remote_font_config.url";
-    const std::string& assetConfigKey = "remote_asset_config.url";
-    bool remoteFontDefined = !ConfigUtil::getConfigValue<std::string>(fontConfigKey, "").empty();
-    bool remoteAssetDefined = !ConfigUtil::getConfigValue<std::string>(assetConfigKey, "").empty();
-    // Both defined: warn and use assetConfigKey
-    if (remoteFontDefined && remoteAssetDefined)
+    // Start the remote font downloading polling thread.
+    std::unique_ptr<RemoteFontConfigPoll> remoteFontConfigThread;
+    try
     {
-        LOG_WRN("Both remote_font_config.url and remote_asset_config.url are defined, "
-                "remote_asset_config.url is overriden on remote_font_config.url");
-        uriConfigKey = assetConfigKey;
+        // Fetch font settings from server if configured
+        remoteFontConfigThread = std::make_unique<RemoteFontConfigPoll>(config());
+        remoteFontConfigThread->start();
     }
-    // only font defined: use fontConfigKey
-    else if (remoteFontDefined && !remoteAssetDefined)
+    catch (const Poco::Exception&)
     {
-        uriConfigKey = fontConfigKey;
+        LOG_DBG("No remote_font_config");
     }
-    // only asset defined: use assetConfigKey
-    else if (!remoteFontDefined && remoteAssetDefined)
-    {
-        uriConfigKey = assetConfigKey;
-    }
-
-    // Start the remote asset downloading polling thread.
-    std::unique_ptr<RemoteAssetConfigPoll> remoteAssetConfigThread;
-    if (!uriConfigKey.empty())
-    {
-        try
-        {
-            // Fetch font and/or templates settings from server if configured
-            remoteAssetConfigThread = std::make_unique<RemoteAssetConfigPoll>(config(), uriConfigKey);
-            remoteAssetConfigThread->start();
-        }
-        catch (const Poco::Exception&)
-        {
-            LOG_DBG("No remote_asset_config");
-        }
-    }
-
 #endif
 
     // URI with /contents are public and we don't need to anonymize them.
@@ -3551,7 +3742,7 @@ int COOLWSD::innerMain()
 #endif
 
     /// The main-poll does next to nothing:
-    SocketPoll mainWait("main");
+    std::shared_ptr<SocketPoll> mainWait = std::make_shared<SocketPoll>("main");
 
     SigUtil::addActivity("coolwsd accepting connections");
 
@@ -3606,7 +3797,7 @@ int COOLWSD::innerMain()
     if (ConfigUtil::getConfigValue<bool>("stop_on_config_change", false))
     {
         std::shared_ptr<InotifySocket> inotifySocket = std::make_shared<InotifySocket>(startStamp);
-        mainWait.insertNewSocket(inotifySocket);
+        mainWait->insertNewSocket(inotifySocket);
     }
 #endif
 #endif
@@ -3628,7 +3819,7 @@ int COOLWSD::innerMain()
             waitMicroS /= 4;
         }
 
-        mainWait.poll(waitMicroS);
+        mainWait->poll(waitMicroS);
 
         // Wake the prisoner poll to spawn some children, if necessary.
         PrisonerPoll->wakeup();
@@ -3697,6 +3888,12 @@ int COOLWSD::innerMain()
     // atexit handlers tend to free Admin before Documents
     LOG_INF("Exiting. Cleaning up lingering documents.");
 #if !MOBILEAPP
+    if (remoteFontConfigThread)
+    {
+        LOG_DBG("Stopping remote font config thread");
+        remoteFontConfigThread->stop();
+    }
+
     if (!SigUtil::getShutdownRequestFlag())
     {
         // This shouldn't happen, but it's fail safe to always cleanup properly.
@@ -3814,9 +4011,13 @@ int COOLWSD::innerMain()
 
     SigUtil::addActivity("terminated unused children");
 
+    ClientRequestDispatcher::uninitialize();
+
 #if !MOBILEAPP
     if (!Util::isKitInProcess())
     {
+        SigUtil::addActivity("waiting for forkit to exit");
+
         // Wait for forkit process finish.
         LOG_INF("Waiting for forkit process to exit");
         int status = 0;
@@ -3834,10 +4035,6 @@ int COOLWSD::innerMain()
 
     SigUtil::addActivity("finished with status " + std::to_string(returnValue));
 
-    // At least on centos7, Poco deadlocks while
-    // cleaning up its SSL context singleton.
-    Util::forcedExit(returnValue);
-
     return returnValue;
 #endif
 }
@@ -3847,7 +4044,7 @@ std::shared_ptr<TerminatingPoll> COOLWSD:: getWebServerPoll ()
     return WebServerPoll;
 }
 
-void COOLWSD::cleanup()
+void COOLWSD::cleanup([[maybe_unused]] int returnValue)
 {
     try
     {
@@ -3863,17 +4060,7 @@ void COOLWSD::cleanup()
         FileRequestHandler.reset();
         JWTAuth::cleanup();
 
-#if ENABLE_SSL
-        // Finally, we no longer need SSL.
-        if (ConfigUtil::isSslEnabled())
-        {
-            Poco::Net::uninitializeSSL();
-            Poco::Crypto::uninitializeCrypto();
-            ssl::Manager::uninitializeClientContext();
-            ssl::Manager::uninitializeServerContext();
-        }
-#endif
-#endif
+        Util::forcedExit(returnValue);
 
         TraceDumper.reset();
 
@@ -3881,8 +4068,30 @@ void COOLWSD::cleanup()
         SocketPoll::InhibitThreadChecks = true;
 
         // Delete these while the static Admin instance is still alive.
-        std::lock_guard<std::mutex> docBrokersLock(DocBrokersMutex);
-        DocBrokers.clear();
+        {
+            std::lock_guard<std::mutex> docBrokersLock(DocBrokersMutex);
+            DocBrokers.clear();
+        }
+
+        SigUtil::uninitialize();
+
+#if ENABLE_SSL
+        // Finally, we no longer need SSL.
+        if (ConfigUtil::isSslEnabled())
+        {
+#if !ENABLE_DEBUG
+            // At least on centos7, Poco deadlocks while
+            // cleaning up its SSL context singleton.
+            Util::forcedExit(returnValue);
+#endif // !ENABLE_DEBUG
+
+            Poco::Net::uninitializeSSL();
+            Poco::Crypto::uninitializeCrypto();
+            ssl::Manager::uninitializeClientContext();
+            ssl::Manager::uninitializeServerContext();
+        }
+#endif
+#endif
     }
     catch (const std::exception& ex)
     {
@@ -3896,7 +4105,7 @@ int COOLWSD::main(const std::vector<std::string>& /*args*/)
     SigUtil::resetTerminationFlags();
 #endif
 
-    int returnValue;
+    int returnValue = EXIT_SOFTWARE;
 
     try {
         returnValue = innerMain();
@@ -3904,16 +4113,23 @@ int COOLWSD::main(const std::vector<std::string>& /*args*/)
     catch (const std::exception& e)
     {
         LOG_FTL("Exception: " << e.what());
-        cleanup();
+        cleanup(returnValue);
         throw;
     } catch (...) {
-        cleanup();
+        cleanup(returnValue);
         throw;
     }
 
-    cleanup();
+    const int unitReturnValue = UnitBase::uninit();
+    if (unitReturnValue != EXIT_OK)
+    {
+        // Overwrite the return value if the unit-test failed.
+        LOG_INF("Overwriting process [coolwsd] exit status ["
+                << returnValue << "] with unit-test status: " << unitReturnValue);
+        returnValue = unitReturnValue;
+    }
 
-    returnValue = UnitBase::uninit();
+    cleanup(returnValue);
 
     LOG_INF("Process [coolwsd] finished with exit status: " << returnValue);
 
@@ -4021,7 +4237,7 @@ void dump_state()
     if (Server)
         Server->dumpState(oss);
 
-    oss << "\nMalloc info: \n" << Util::getMallocInfo() << '\n';
+    oss << "\nMalloc info [" << getpid() << "]: \n" << Util::getMallocInfo() << '\n';
 
     const std::string msg = oss.str();
     fprintf(stderr, "%s\n", msg.c_str());

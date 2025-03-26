@@ -129,6 +129,8 @@ class SlideShowPresenter {
 	private _cypressSVGPresentationTest: boolean = false;
 	private _onKeyDownHandler: (e: KeyboardEvent) => void;
 	private _onImpressModeChanged: any = null;
+	private _startingPresentation: boolean = false;
+	private _hammer: HammerManager;
 
 	constructor(map: any) {
 		this._cypressSVGPresentationTest =
@@ -172,7 +174,8 @@ class SlideShowPresenter {
 	}
 
 	private onUpdateParts() {
-		if (this._checkAlreadyPresenting()) this.onSlideShowInfoChanged();
+		if (this._checkAlreadyPresenting() && !this._startingPresentation)
+			this.onSlideShowInfoChanged();
 	}
 
 	public getNavigator() {
@@ -268,7 +271,7 @@ class SlideShowPresenter {
 			this._presenterContainer = null;
 		}
 		// #7102 on exit from fullscreen we don't get a 'focus' event
-		// in chome so a later second attempt at launching a presentation
+		// in Chrome so a later second attempt at launching a presentation
 		// fails
 		this._map.focus();
 	}
@@ -346,6 +349,20 @@ class SlideShowPresenter {
 			this._slideShowNavigator.onMouseMove.bind(this._slideShowNavigator),
 		);
 
+		if (this._hammer) {
+			this._hammer.off('swipe');
+		}
+		this._hammer = new Hammer(canvas);
+		this._hammer.get('swipe').set({
+			direction: Hammer.DIRECTION_ALL,
+		});
+		this._hammer.on(
+			'swipe',
+			window.touch
+				.touchOnly(this._slideShowNavigator.onSwipe)
+				.bind(this._slideShowNavigator),
+		);
+
 		this._slideShowHandler.getContext().aCanvas = canvas;
 
 		try {
@@ -407,6 +424,7 @@ class SlideShowPresenter {
 		}
 
 		this._canvasLoader.startLoader();
+		this._startingPresentation = false;
 	}
 
 	public stopLoader(): void {
@@ -564,10 +582,7 @@ class SlideShowPresenter {
 			return false;
 		}
 
-		if (
-			(window as any).ThisIsTheiOSApp ||
-			(window as any).ThisIsTheAndroidApp
-		) {
+		if ((window as any).ThisIsTheAndroidApp) {
 			window.postMobileMessage('SLIDESHOW');
 			return false;
 		}
@@ -705,7 +720,7 @@ class SlideShowPresenter {
 			return;
 		// disable slide sorter or it will receive key events
 		this._map._docLayer._preview.partsFocused = false;
-
+		this._startingPresentation = true;
 		app.socket.sendMessage('getpresentationinfo');
 	}
 
@@ -717,6 +732,7 @@ class SlideShowPresenter {
 			return;
 		// disable present in console onStartInWindow
 		this._enablePresenterConsole(true);
+		this._startingPresentation = true;
 		app.socket.sendMessage('getpresentationinfo');
 	}
 
@@ -751,9 +767,8 @@ class SlideShowPresenter {
 				// presentation is changed and presentation info has been updated
 				this._presentationInfoChanged = false;
 				// clean
-				if (this._slideRenderer.isAnyVideoPlaying) {
-					this._slideRenderer.pauseVideos();
-				}
+				if (currentSlideHash)
+					this._slideCompositor.pauseVideos(currentSlideHash);
 				this._slideShowHandler.skipAllEffects();
 				this._slideShowHandler.cleanLeavingSlideStatus(
 					this._slideShowNavigator.currentSlideIndex,

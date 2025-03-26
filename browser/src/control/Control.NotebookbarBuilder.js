@@ -28,7 +28,6 @@ L.Control.NotebookbarBuilder = L.Control.JSDialogBuilder.extend({
 		this._controlHandlers['exportmenubutton'] = this._exportMenuButton;
 		this._controlHandlers['tabcontrol'] = this._overriddenTabsControlHandler;
 		this._controlHandlers['tabpage'] = this._overriddenTabPageHandler;
-		this._controlHandlers['toolbox'] = this._toolboxHandler;
 
 		this._controlHandlers['pushbutton'] = function() { return false; };
 		this._controlHandlers['spinfield'] = function() { return false; };
@@ -123,7 +122,6 @@ L.Control.NotebookbarBuilder = L.Control.JSDialogBuilder.extend({
 		this._toolitemHandlers['.uno:ObjectAlign'] = function() {};
 
 		/*Graphic Tab*/
-		this._toolitemHandlers['.uno:Crop'] = function() {};
 		this._toolitemHandlers['.uno:GraphicFilterToolbox'] = function() {};
 		this._toolitemHandlers['.uno:SaveGraphic'] = function() {};
 		this._toolitemHandlers['.uno:InsertCaptionDialog'] = function() {};
@@ -279,16 +277,6 @@ L.Control.NotebookbarBuilder = L.Control.JSDialogBuilder.extend({
 		JSDialog.MakeFocusCycle(tabPage);
 
 		return result;
-	},
-
-	_toolboxHandler: function(parentContainer, data) {
-		if (data.enabled === false || data.enabled === 'false') {
-			for (var index in data.children) {
-				data.children[index].enabled = false;
-			}
-		}
-
-		return true;
 	},
 
 	_exportMenuButton: function(parentContainer, data, builder) {
@@ -784,6 +772,9 @@ $(control.label).unbind('click');
 		if (!data.length)
 			return;
 
+		const inlineLabels = this.options.useInLineLabelsForUnoButtons;
+		this.options.useInLineLabelsForUnoButtons = false;
+
 		data = data[0];
 
 		var type = data.type;
@@ -803,7 +794,7 @@ $(control.label).unbind('click');
 			$('#' + data.id).addClass('hidden-from-event');
 		}
 
-		this.options.useInLineLabelsForUnoButtons = false;
+		this.options.useInLineLabelsForUnoButtons = inlineLabels;
 	},
 
 	// replaces widget in-place with new instance with updated data
@@ -860,21 +851,21 @@ $(control.label).unbind('click');
 				processChildren = handler(childObject, childData.children, this);
 			} else {
 				if (handler) {
+					if (childType === 'toolbox' && hasVerticalParent === true && childData.children.length === 1)
+						this.options.useInLineLabelsForUnoButtons = true;
+
 					processChildren = handler(childObject, childData, this);
 					this.postProcess(childObject, childData);
+
+					this.options.useInLineLabelsForUnoButtons = false;
 				} else
 					window.app.console.warn('NotebookbarBuilder: Unsupported control type: "' + childType + '"');
 
-				if (childType === 'toolbox' && hasVerticalParent === true && childData.children.length === 1)
-					this.options.useInLineLabelsForUnoButtons = true;
-
 				if (processChildren && childData.children != undefined)
-					this.build(childObject, childData.children, isVertical, hasManyChildren);
+					this.build(childObject, childData.children, isVertical);
 				else if (childData.visible && (childData.visible === false || childData.visible === 'false')) {
 					$('#' + childData.id).addClass('hidden-from-event');
 				}
-
-				this.options.useInLineLabelsForUnoButtons = false;
 			}
 		}
 	}

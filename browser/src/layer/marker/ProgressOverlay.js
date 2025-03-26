@@ -3,7 +3,7 @@
  * L.ProgressOverlay is used to overlay progress images over the map.
  */
 
-/* global brandProductName $ */
+/* global app brandProductName $ */
 L.ProgressOverlay = L.Layer.extend({
 
 	options: {
@@ -11,6 +11,9 @@ L.ProgressOverlay = L.Layer.extend({
 	},
 
 	initialize: function (size) {
+
+		L.Layer.prototype.initialize.call(this);
+
 		this._size = size;
 		this._percent = 0;
 		this._initLayout();
@@ -59,7 +62,7 @@ L.ProgressOverlay = L.Layer.extend({
 
 	showSpinner: function() {
 		L.DomUtil.get('document-container').appendChild(this._container);
-		this._spinnerInterval = L.LOUtil.startSpinner(this._spinnerCanvas, this.options.spinnerSpeed);
+		this._spinnerInterval = app.LOUtil.startSpinner(this._spinnerCanvas, this.options.spinnerSpeed);
 	},
 
 	hideSpinner: function() {

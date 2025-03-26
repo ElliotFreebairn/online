@@ -59,6 +59,7 @@
 #include <wasm/base64.hpp>
 #include <common/ConfigUtil.hpp>
 #include <common/Unit.hpp>
+#include <common/Util.hpp>
 
 // Bug in pre C++17 where static constexpr must be defined. Fixed in C++17.
 constexpr std::chrono::microseconds SocketPoll::DefaultPollTimeoutMicroS;
@@ -149,18 +150,9 @@ std::string Socket::getStatsString(const std::chrono::steady_clock::time_point &
 
 std::ostream& Socket::streamImpl(std::ostream& os) const
 {
-    os << "Socket[#" << getFD()
-       << ", " << toString(type())
-       << " @ ";
-    if (Type::IPv6 == type())
-    {
-        os << "[" << clientAddress() << "]:" << clientPort();
-    }
-    else
-    {
-        os << clientAddress() << ":" << clientPort();
-    }
-    return os << "]";
+    os << "Socket[#" << getFD() << ", " << toString(type()) << " @ " << clientAddress() << ":"
+       << clientPort() << ']';
+    return os;
 }
 
 std::string Socket::toStringImpl() const
@@ -231,7 +223,7 @@ bool SslStreamSocket::verifyCertificate()
     }
 
     LOG_TRC("Verifying certificate of [" << hostname() << ']');
-    X509* x509 = SSL_get_peer_certificate(_ssl);
+    X509* x509 = SSL_get1_peer_certificate(_ssl);
     if (x509)
     {
         // Dump cert info, for debugging only.
@@ -260,11 +252,9 @@ bool SslStreamSocket::verifyCertificate()
             LOG_TRC("SSL cert verified for host [" << hostname() << ']');
             return true;
         }
-        else
-        {
-            LOG_INF("SSL cert failed verification for host [" << hostname() << ']');
-            return false;
-        }
+
+        LOG_INF("SSL cert failed verification for host [" << hostname() << ']');
+        return false;
     }
 
     return false;
@@ -273,7 +263,7 @@ bool SslStreamSocket::verifyCertificate()
 std::string SslStreamSocket::getSslCert(std::string& subjectHash)
 {
     std::ostringstream strstream;
-    if (X509* x509 = SSL_get_peer_certificate(_ssl))
+    if (X509* x509 = SSL_get1_peer_certificate(_ssl))
     {
         Poco::Net::X509Certificate cert(x509);
         cert.save(strstream);
@@ -302,15 +292,15 @@ namespace {
 
 
 SocketPoll::SocketPoll(std::string threadName)
-    : _name(std::move(threadName)),
-      _pollStartIndex(0),
-      _stop(false),
-      _threadStarted(0),
-      _threadFinished(false),
-      _runOnClientThread(false),
-      _owner(std::this_thread::get_id()),
-      _ownerThreadId(Util::getThreadId()),
-      _watchdogTime(Watchdog::getDisableStamp())
+    : _name(std::move(threadName))
+    , _pollStartIndex(0)
+    , _owner(std::this_thread::get_id())
+    , _threadStarted(0)
+    , _watchdogTime(Watchdog::getDisableStamp())
+    , _ownerThreadId(Util::getThreadId())
+    , _stop(false)
+    , _threadFinished(false)
+    , _runOnClientThread(false)
 {
     ProfileZone profileZone("SocketPoll::SocketPoll");
 
@@ -359,6 +349,7 @@ void SocketPoll::checkAndReThread()
 
 void SocketPoll::removeFromWakeupArray()
 {
+    if (_wakeup[1] != -1)
     {
         std::lock_guard<std::mutex> lock(getPollWakeupsMutex());
         auto it = std::find(getWakeupsArray().begin(),
@@ -483,7 +474,7 @@ void SocketPoll::enableWatchdog()
     _watchdogTime = Watchdog::getTimestamp();
 }
 
-int SocketPoll::poll(int64_t timeoutMaxMicroS)
+int SocketPoll::poll(int64_t timeoutMaxMicroS, bool justPoll)
 {
     if (_runOnClientThread)
         checkAndReThread();
@@ -533,6 +524,22 @@ int SocketPoll::poll(int64_t timeoutMaxMicroS)
 
     // from now we want to race back to sleep.
     enableWatchdog();
+
+    if (justPoll)
+    {
+        // Done with the poll(), don't process anything.
+        bool ret = false;
+        // Run through the poll entries (except the wakeup poll), and combine them into an answer.
+        for (size_t i = 0; i < size; ++i)
+        {
+            if (_pollFds[i].revents)
+            {
+                ret = true;
+                break;
+            }
+        }
+        return ret;
+    }
 
     // First process the wakeup pipe (always the last entry).
     if (_pollFds[size].revents)
@@ -652,7 +659,7 @@ int SocketPoll::poll(int64_t timeoutMaxMicroS)
                     rc = -1;
                 }
 
-                if (_pollSockets[i]->isClosed() || !disposition.isContinue())
+                if (_pollSockets[i]->isShutdown() || !disposition.isContinue())
                 {
                     ++itemsErased;
                     LOGA_TRC(Socket, '#' << _pollFds[i].fd << ": Removing socket (at " << i
@@ -712,7 +719,7 @@ void SocketPoll::closeAllSockets()
     for (std::shared_ptr<Socket> &it : _pollSockets)
     {
         // first close the underlying socket
-        ::close(it->getFD());
+        it->closeFD(*this);
 
         // avoid the socketHandler' getting an onDisconnect
         auto stream = dynamic_cast<StreamSocket *>(it.get());
@@ -1019,6 +1026,9 @@ void StreamSocket::dumpState(std::ostream& os)
 {
     int64_t timeoutMaxMicroS = SocketPoll::DefaultPollTimeoutMicroS.count();
     const int events = getPollEvents(std::chrono::steady_clock::now(), timeoutMaxMicroS);
+
+    // The format of the table is as follows (spaces are really tabs):
+    // "fd events status rbuffered rcapacity wbuffered wcapacity rtotal wtotal clientaddress";
     os << '\t' << std::setw(6) << getFD() << "\t0x" << std::hex << events << std::dec
        << (ignoringInput() ? "\t\tignore\t" : "\t\tprocess\t") << std::setw(7) << _inBuffer.size()
        << '\t' << std::setw(7) << _inBuffer.capacity() << '\t' << std::setw(6) << _outBuffer.size()
@@ -1037,11 +1047,9 @@ bool StreamSocket::send(const http::Response& response)
         flush();
         return true;
     }
-    else
-    {
-        shutdown();
-        return false;
-    }
+
+    shutdown();
+    return false;
 }
 
 bool StreamSocket::send(http::Request& request)
@@ -1051,11 +1059,9 @@ bool StreamSocket::send(http::Request& request)
         flush();
         return true;
     }
-    else
-    {
-        shutdown();
-        return false;
-    }
+
+    shutdown();
+    return false;
 }
 
 bool StreamSocket::sendAndShutdown(http::Response& response)
@@ -1072,8 +1078,9 @@ bool StreamSocket::sendAndShutdown(http::Response& response)
 
 void SocketPoll::dumpState(std::ostream& os) const
 {
+    THREAD_UNSAFE_DUMP_BEGIN
     // FIXME: NOT thread-safe! _pollSockets is modified from the polling thread!
-    const auto pollSockets = _pollSockets;
+    const std::vector<std::shared_ptr<Socket>> pollSockets = _pollSockets;
 
     os << "\n  SocketPoll [" << name() << "] with " << pollSockets.size() << " socket"
        << (pollSockets.size() == 1 ? "" : "s") << " - wakeup rfd: " << _wakeup[0]
@@ -1086,6 +1093,7 @@ void SocketPoll::dumpState(std::ostream& os) const
     for (const std::shared_ptr<Socket>& socket : pollSockets)
         socket->dumpState(os);
     os << "\n  Done [" << name() << "]\n";
+    THREAD_UNSAFE_DUMP_END
 }
 
 /// Returns true on success only.
@@ -1237,6 +1245,7 @@ std::shared_ptr<Socket> ServerSocket::accept()
         ::close(rc);
         return nullptr;
     }
+
     try
     {
         // Create a socket object using the factory.
@@ -1450,7 +1459,7 @@ LocalServerSocket::~LocalServerSocket()
 std::ostream& StreamSocket::stream(std::ostream& os) const
 {
     os << "StreamSocket[#" << getFD()
-       << ", " << toStringShort(_wsState)
+       << ", " << nameShort(_wsState)
        << ", " << Socket::toString(type())
        << " @ ";
     if (Type::IPv6 == type())
@@ -1487,21 +1496,21 @@ bool StreamSocket::checkRemoval(std::chrono::steady_clock::time_point now)
         if (_socketHandler)
         {
             _socketHandler->onDisconnect();
-            if (!isClosed())
+            if (!isShutdown())
             {
                 // Note: Ensure proper semantics of onDisconnect()
                 LOG_WRN("Socket still open post onDisconnect(), forced shutdown.");
                 shutdown(); // signal
-                closeConnection(); // real -> setClosed()
+                shutdownConnection(); // real -> setShutdown()
             }
         }
         else
         {
             shutdown(); // signal
-            closeConnection(); // real -> setClosed()
+            shutdownConnection(); // real -> setShutdown()
         }
 
-        assert(isClosed()); // should have issued shutdown
+        assert(isShutdown() && "Should have issued shutdown");
         return true;
     }
 
@@ -1525,7 +1534,7 @@ bool StreamSocket::parseHeader(const char *clientName,
     std::chrono::duration<float, std::milli> delayMs = now - lastHTTPHeader;
 
     // Find the end of the header, if any.
-    static const std::string marker("\r\n\r\n");
+    constexpr std::string_view marker("\r\n\r\n");
     auto itBody = std::search(_inBuffer.begin(), _inBuffer.end(), marker.begin(), marker.end());
     if (itBody == _inBuffer.end())
     {
@@ -1638,10 +1647,10 @@ bool StreamSocket::parseHeader(const char *clientName,
                     shutdown();
                     return false; // TODO: throw something sensible in this case
                 }
-                else
-                {
-                    LOG_CHUNK("parseHeader: Chunk " << chunk << " is: \n" << Util::dumpHex("", "", chunkStart, itBody + 1, false));
-                }
+
+                LOG_CHUNK("parseHeader: Chunk "
+                          << chunk << " is: \n"
+                          << Util::dumpHex("", "", chunkStart, itBody + 1, false));
 
                 itBody+=2;
                 chunk++;
@@ -1776,7 +1785,7 @@ namespace {
         static std::string generateKey()
         {
             auto random = Util::rng::getBytes(16);
-            return macaron::Base64::Encode(std::string(random.begin(), random.end()));
+            return macaron::Base64::Encode(std::string_view(random.data(), random.size()));
         }
     };
 }

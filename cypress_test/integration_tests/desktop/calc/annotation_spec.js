@@ -19,7 +19,7 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('contain','some text');
 	});
 
@@ -32,7 +32,7 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('contain','some text');
 		cy.cGet('#comment-annotation-menu-1').click();
 		cy.cGet('body').contains('.context-menu-item','Modify').click();
@@ -42,7 +42,7 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#annotation-content-area-1').trigger('mouseover');
+		cy.cGet('#annotation-content-area-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('contain','some text0, some other text');
 		cy.cGet('#comment-container-1').should('exist');
 	});
@@ -56,7 +56,7 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('contain','some text');
 		cy.cGet('#comment-annotation-menu-1').click();
 		cy.cGet('.context-menu-list:visible .context-menu-item').should('not.have.text', 'Reply');
@@ -71,7 +71,7 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('contain','some text');
 		cy.cGet('#comment-annotation-menu-1').click();
 		cy.cGet('body').contains('.context-menu-item','Remove').click();
@@ -95,6 +95,22 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 		calcHelper.assertNumberofSheets(2);
 		cy.cGet('#comment-container-1').should('not.exist');
 	});
+
+	it('Tab Nevigation', function() {
+		desktopHelper.insertComment(undefined, false);
+
+		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
+		cy.realPress('Tab');
+		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
+		cy.cGet('#annotation-cancel-new:focus-visible');
+
+		cy.realPress('Tab');
+		cy.cGet('#annotation-save-new:focus-visible');
+		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
+
+		cy.realPress('Tab');
+		cy.cGet('.cool-annotation-autosavelabel').should('be.visible');
+	});
 });
 
 describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
@@ -117,7 +133,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 	});
 
@@ -133,7 +149,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.display = '';
 		});
 		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 
 		helper.reloadDocument(newFilePath);
@@ -142,7 +158,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 	});
 
@@ -168,7 +184,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 		cy.cGet('#comment-annotation-menu-1').click();
 		cy.cGet('body').contains('.context-menu-item','Modify').click();
@@ -183,7 +199,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0, some other text');
 	});
 
@@ -196,7 +212,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 		cy.cGet('#comment-annotation-menu-1').click();
 		cy.cGet('body').contains('.context-menu-item','Modify').click();
@@ -209,7 +225,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#annotation-content-area-1').trigger('mouseover');
+		cy.cGet('#annotation-content-area-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0, some other text');
 		cy.cGet('#comment-container-1').should('exist');
 
@@ -219,7 +235,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0, some other text');
 	});
 
@@ -232,7 +248,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 		cy.cGet('#comment-annotation-menu-1').click();
 		cy.cGet('body').contains('.context-menu-item','Modify').click();
@@ -245,7 +261,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#annotation-content-area-1').trigger('mouseover');
+		cy.cGet('#annotation-content-area-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 		cy.cGet('#comment-container-1').should('exist');
 
@@ -255,7 +271,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 			element[0].style.visibility = '';
 			element[0].style.display = '';
 		});
-		cy.cGet('#comment-container-1').trigger('mouseover');
+		cy.cGet('#comment-container-1').trigger('mouseover', {force: true});
 		cy.cGet('#annotation-content-area-1').should('have.text','some text0');
 	});
 });

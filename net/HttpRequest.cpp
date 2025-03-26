@@ -191,7 +191,7 @@ int64_t Header::getContentLength() const
 }
 
 /// Parses a Status Line.
-/// Returns the state and clobbers the len on succcess to the number of bytes read.
+/// Returns the state and clobbers the len on success to the number of bytes read.
 FieldParseState StatusLine::parse(const char* p, int64_t& len)
 {
 #ifdef DEBUG_HTTP
@@ -407,12 +407,10 @@ int64_t Request::readData(const char* p, const int64_t len)
             // A payload in a GET request "has no defined semantics".
             return len - available;
         }
-        else
-        {
-            // TODO: Implement POST and HEAD support.
-            LOG_ERR("Unsupported HTTP Method [" << _verb << ']');
-            return -1;
-        }
+
+        // TODO: Implement POST and HEAD support.
+        LOG_ERR("Unsupported HTTP Method [" << _verb << ']');
+        return -1;
     }
 
     return len - available;

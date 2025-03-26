@@ -53,11 +53,12 @@ man_MANS = man/coolwsd.1 \
            man/coolmount.1
 
 
-dist_doc_DATA = wsd/README.md \
-                wsd/README.vars \
+dist_doc_DATA = wsd/README.vars \
                 wsd/protocol.txt \
                 wsd/metrics.txt \
                 THIRDPARTYLICENSES
+
+doc_DATA = collabora-online-sbom.spdx.json
 
 coolwsddatadir = @COOLWSD_DATADIR@
 
@@ -110,7 +111,7 @@ coolwsd_LDADD = ${OPENSSL_LIBS}
 coolconfig_LDADD = ${OPENSSL_LIBS}
 endif
 
-AM_ETAGSFLAGS = --c++-kinds=+p --fields=+iaS --extra=+q -R --totals=yes --exclude=browser *
+AM_ETAGSFLAGS = --c++-kinds=+p --fields=+iaS --extra=+q -R --totals=yes --exclude=browser/node_modules --exclude=browser/dist *
 AM_CTAGSFLAGS = $(AM_ETAGSFLAGS)
 
 shared_sources = common/FileUtil.cpp \
@@ -149,6 +150,7 @@ coolwsd_sources = common/Crypto.cpp \
                   wsd/Admin.cpp \
                   wsd/AdminModel.cpp \
                   wsd/Auth.cpp \
+                  wsd/CacheUtil.cpp \
                   wsd/COOLWSD.cpp \
                   wsd/ClientRequestDispatcher.cpp \
                   wsd/ClientSession.cpp \
@@ -339,6 +341,7 @@ coolsocketdump_SOURCES = tools/WebSocketDump.cpp \
 wsd_headers = wsd/Admin.hpp \
               wsd/AdminModel.hpp \
               wsd/Auth.hpp \
+              wsd/CacheUtil.hpp \
               wsd/COOLWSD.hpp \
               wsd/ClientRequestDispatcher.hpp \
               wsd/ClientSession.hpp \
@@ -347,6 +350,7 @@ wsd_headers = wsd/Admin.hpp \
               wsd/Exceptions.hpp \
               wsd/FileServer.hpp \
               wsd/HostUtil.hpp \
+              wsd/PresetsInstall.hpp \
               wsd/Process.hpp \
               wsd/ProofKey.hpp \
               wsd/ProxyProtocol.hpp \
@@ -435,17 +439,18 @@ kit_headers = kit/ChildSession.hpp \
 
 noinst_HEADERS = $(wsd_headers) $(shared_headers) $(kit_headers) \
                  tools/COOLWebSocket.hpp \
-                 test/UnitHTTP.hpp \
                  test/HttpTestServer.hpp \
-                 test/WopiTestServer.hpp \
                  test/KitPidHelpers.hpp \
+                 test/UnitHTTP.hpp \
+                 test/UnitTimeoutBase.hpp \
+                 test/UnitWSDClient.hpp \
+                 test/WOPIUploadConflictCommon.hpp \
+                 test/WebSocketSession.hpp \
+                 test/WopiTestServer.hpp \
+                 test/helpers.hpp \
                  test/lokassert.hpp \
                  test/test.hpp \
-                 test/testlog.hpp \
-                 test/HttpTestServer.hpp \
-                 test/WOPIUploadConflictCommon.hpp \
-                 test/UnitWSDClient.hpp \
-                 test/helpers.hpp
+                 test/testlog.hpp
 
 GIT_BRANCH := $(shell git symbolic-ref --short HEAD)
 GIT_HASH := $(shell git log -1 --format=%h --abbrev=10)
@@ -462,6 +467,7 @@ dist-hook:
 
 EXTRA_DIST = discovery.xml \
              favicon.ico \
+             cool-sbom-template.spdx.json \
              coolkitconfig.xcu \
              coolwsd.spec \
              coolwsd.xml.in \
@@ -485,6 +491,7 @@ EXTRA_DIST = discovery.xml \
              etc/ca-chain.cert.pem \
              etc/apache2/coolwsd.conf \
              etc/nginx/coolwsd.conf \
+             scripts/create-sbom.py \
              scripts/unocommands.py \
              scripts/refresh-git-hooks \
              README.md \
@@ -531,6 +538,14 @@ $(SYSTEM_STAMP): ${top_srcdir}/coolwsd-systemplate-setup $(CLEANUP_DEPS)
 	@$(CLEANUP_COMMAND)
 	mkdir -p $@
 
+@CACHE_PATH@:
+	@$(CLEANUP_COMMAND)
+	mkdir -p $@
+
+presets-dir:
+	@rm -rf $(abs_top_srcdir)/test/data/presets
+	@cp -r $(abs_top_srcdir)/test/data/presets-default $(abs_top_srcdir)/test/data/presets
+
 cleanup:
 	$(CLEANUP_COMMAND)
 
@@ -542,9 +557,11 @@ clean-local:
 	$(CLEANUP_COMMAND)
 	if test "z@SYSTEMPLATE_PATH@" != "z"; then rm -rf "@SYSTEMPLATE_PATH@" || echo "WARNING: failed to remove the systemplate"; fi
 	if test "z@JAILS_PATH@" != "z"; then rm -rf "@JAILS_PATH@" || echo "WARNING: failed to remove all jails cleanly"; fi
+	if test "z@CACHE_PATH@" != "z"; then rm -rf "@CACHE_PATH@" || echo "WARNING: failed to remove all cache cleanly"; fi
 	rm -rf "${top_srcdir}/loleaflet"
 	rm -rf loolconfig loolconvert loolforkit loolmap loolmount # kill old binaries
 	rm -rf loolwsd loolwsd_fuzzer coolwsd_fuzzer loolstress loolsocketdump
+	rm -rf collabora-online-sbom.spdx.json
 	$(CLEANUP_COVERAGE)
 
 if ENABLE_DEBUG
@@ -555,17 +572,27 @@ else
   OUTPUT_TO_FILE=false
 endif
 
-setup-wsd: all @JAILS_PATH@
+QUIET_SAMPLES = $(QUIET_SAMPLES_$(V))
+QUIET_SAMPLES_ = $(QUIET_SAMPLES_$(AM_DEFAULT_VERBOSITY))
+QUIET_SAMPLES_0 = @echo "  SAMPLES " $@;
+
+QUIET_SBOM = $(QUIET_SBOM_$(V))
+QUIET_SBOM_ = $(QUIET_SBOM_$(AM_DEFAULT_VERBOSITY))
+QUIET_SBOM_0 = @echo "  SBOM    " $@;
+
+setup-wsd: all @JAILS_PATH@ @CACHE_PATH@ presets-dir
 	@echo "Launching coolwsd"
 	@fc-cache "@LO_PATH@"/share/fonts/truetype
 	@mkdir -p $(abs_top_builddir)/test/samples
-	@$(abs_top_srcdir)/scripts/build-samples.py $(abs_top_srcdir)/test/samples $(abs_top_srcdir)/test/samples
+	$(QUIET_SAMPLES) $(abs_top_srcdir)/scripts/build-samples.py $(abs_top_srcdir)/test/samples $(abs_top_srcdir)/test/samples
 	@echo
 
 COMMON_PARAMS = \
 	$(if $(TEST_APPARMOR),--disable-cool-user-checking) \
 	--o:sys_template_path="@SYSTEMPLATE_PATH@" \
-	--o:child_root_path="@JAILS_PATH@" --o:storage.filesystem[@allow]=true \
+	--o:child_root_path="@JAILS_PATH@" \
+	--o:cache_files.path="@CACHE_PATH@" \
+	--o:storage.filesystem[@allow]=true \
 	--o:ssl.cert_file_path="$(abs_top_srcdir)/etc/cert.pem" \
 	--o:ssl.key_file_path="$(abs_top_srcdir)/etc/key.pem" \
 	--o:ssl.ca_file_path="$(abs_top_srcdir)/etc/ca-chain.cert.pem" \
@@ -668,7 +695,7 @@ else
 ALL_LOCAL_DEPS=coolwsd
 endif
 
-all-local: $(ALL_LOCAL_DEPS) @JAILS_PATH@ $(SYSTEM_STAMP)
+all-local: $(ALL_LOCAL_DEPS) @JAILS_PATH@ @CACHE_PATH@ $(SYSTEM_STAMP)
 	@$(abs_top_srcdir)/scripts/refresh-git-hooks
 
 # just run the build without any tests
@@ -797,7 +824,7 @@ check-for-system-nss:
 
 check-recursive: eslint
 
-check: check-for-system-nss prettier eslint check-recursive
+check: check-for-system-nss prettier eslint presets-dir check-recursive
 	$(GEN_COVERAGE_COMMAND)
 
 coverage-report:
@@ -806,5 +833,22 @@ coverage-report:
 coverage-clean:
 	$(CLEANUP_COVERAGE)
 
+# a) -D/usr/include, don't care about system headers
+# b) -xProtocolHandlerInterface, this class poses a problem for pahole 1.29
+# (https://github.com/acmel/dwarves/issues/38 might be relevant)
+# c) Redirect stderr to /dev/null because there are a lot of dwarf parse
+# warnings: 'template_parameter_pack__load_params: DW_TAG_template_value_parameter'
+# possibly related to https://gcc.gnu.org/wiki/TemplateParmsDwarf
+check-struct-packing:
+	@echo Note: results only reliable with clang++ and CXXFLAGS=-fno-eliminate-unused-debug-types
+	@if pahole -D/usr/include -x ProtocolHandlerInterface -P coolwsd 2> /dev/null | grep .; then \
+		echo you can examine each candidate with pahole -S -R --class_name=CANDIDATE coolwsd; \
+		exit 1; \
+	fi
+	@echo coolwsd struct packing is acceptably optimal
+
 czech: check
 	@echo "This should do something much cooler"
+
+collabora-online-sbom.spdx.json: coolforkit-ns
+	$(QUIET_SBOM) python3 $(abs_top_srcdir)/scripts/create-sbom.py $(abs_top_builddir)

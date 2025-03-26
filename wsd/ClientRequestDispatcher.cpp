@@ -112,13 +112,14 @@ inline void shutdownLimitReached(const std::shared_ptr<ProtocolHandlerInterface>
 /// Returns the error message, if any, when no DocBroker is created/found.
 std::pair<std::shared_ptr<DocumentBroker>, std::string>
 findOrCreateDocBroker(DocumentBroker::ChildType type, const std::string& uri,
-                      const std::string& docKey, const std::string& id, const Poco::URI& uriPublic,
-                      unsigned mobileAppDocId,
-                      std::unique_ptr<WopiStorage::WOPIFileInfo> wopiFileInfo)
+                      const std::string& docKey, const std::string& configId,
+                      const std::string& id, const Poco::URI& uriPublic,
+                      unsigned mobileAppDocId)
 {
     LOG_INF("Find or create DocBroker for docKey ["
             << docKey << "] for session [" << id << "] on url ["
-            << COOLWSD::anonymizeUrl(uriPublic.toString()) << ']');
+            << COOLWSD::anonymizeUrl(uriPublic.toString()) << ']'
+            << " with configid " << configId);
 
     std::unique_lock<std::mutex> docBrokersLock(DocBrokersMutex);
 
@@ -186,8 +187,8 @@ findOrCreateDocBroker(DocumentBroker::ChildType type, const std::string& uri,
 
         // Set the one we just created.
         LOG_DBG("New DocumentBroker for docKey [" << docKey << ']');
-        docBroker = std::make_shared<DocumentBroker>(type, uri, uriPublic, docKey, mobileAppDocId,
-                                                     std::move(wopiFileInfo));
+        docBroker = std::make_shared<DocumentBroker>(type, uri, uriPublic, docKey,
+                                                     configId, mobileAppDocId);
         DocBrokers.emplace(docKey, docBroker);
         LOG_TRC("Have " << DocBrokers.size() << " DocBrokers after inserting [" << docKey << ']');
     }
@@ -261,7 +262,7 @@ public:
             '/');
         LOG_TRC("Created temporary convert-to/insert path: " << tempPath.toString());
 
-        // Prevent user inputing anything funny here.
+        // Prevent user inputting anything funny here.
         std::string fileParam = params.get("filename");
         std::string cleanFilename = Util::cleanupFilename(fileParam);
         if (fileParam != cleanFilename)
@@ -375,21 +376,24 @@ getConvertToBrokerImplementation(const std::string& requestType, const std::stri
     if (requestType == "convert-to")
         return std::make_shared<ConvertToBroker>(fromPath, uriPublic, docKey, format, options,
                                                  lang);
-    else if (requestType == "extract-link-targets")
+
+    if (requestType == "extract-link-targets")
         return std::make_shared<ExtractLinkTargetsBroker>(fromPath, uriPublic, docKey, lang);
-    else if (requestType == "extract-document-structure")
+
+    if (requestType == "extract-document-structure")
         return std::make_shared<ExtractDocumentStructureBroker>(fromPath, uriPublic, docKey, lang,
                                                                 filter);
-    else if (requestType == "transform-document-structure")
+    if (requestType == "transform-document-structure")
     {
         if (format.empty())
-            return std::make_shared<TransformDocumentStructureBroker>(fromPath, uriPublic, docKey,
-                Poco::Path(fromPath).getExtension(), lang, transformJSON);
-        else
-            return std::make_shared<TransformDocumentStructureBroker>(fromPath, uriPublic, docKey,
-                format, lang, transformJSON);
+            return std::make_shared<TransformDocumentStructureBroker>(
+                fromPath, uriPublic, docKey, Poco::Path(fromPath).getExtension(), lang,
+                transformJSON);
+        return std::make_shared<TransformDocumentStructureBroker>(fromPath, uriPublic, docKey,
+                                                                  format, lang, transformJSON);
     }
-    else if (requestType == "get-thumbnail")
+
+    if (requestType == "get-thumbnail")
         return std::make_shared<GetThumbnailBroker>(fromPath, uriPublic, docKey, lang, target);
 
     return nullptr;
@@ -482,7 +486,7 @@ public:
         };
 
         const std::string& addressToCheck = _addressesToResolve.front();
-        net::AsyncDNS::lookup(addressToCheck, {}, pushHostnameResolvedToPoll, dumpState);
+        net::AsyncDNS::lookup(addressToCheck, pushHostnameResolvedToPoll, dumpState);
     }
 
     void hostnameResolved(const net::HostEntry& hostEntry)
@@ -574,7 +578,7 @@ bool ClientRequestDispatcher::allowConvertTo(const std::string& address,
             if (!allowPostFrom(addressToCheck))
             {
                 // postpone resolving addresses until later
-                addressesToResolve.push_back(addressToCheck);
+                addressesToResolve.push_back(std::move(addressToCheck));
                 continue;
             }
 
@@ -623,6 +627,11 @@ void launchAsyncCheckFileInfo(
 
     if (!accessDetails.permission().empty())
         options.push_back("permission=" + accessDetails.permission());
+
+#if ENABLE_DEBUG
+    if (!accessDetails.wopiConfigId().empty())
+        options.push_back("configid=" + accessDetails.wopiConfigId());
+#endif
 
     const RequestDetails fullRequestDetails =
         RequestDetails(accessDetails.wopiSrc(), options, /*compat=*/std::string());
@@ -731,7 +740,8 @@ void ClientRequestDispatcher::handleIncomingMessage(SocketDisposition& dispositi
                     auto accessDetails = FileServerRequestHandler::ResourceAccessDetails(
                         mapAccessDetails.at("wopiSrc"),
                         mapAccessDetails.at("accessToken"),
-                        mapAccessDetails.at("permission"));
+                        mapAccessDetails.at("permission"),
+                        mapAccessDetails.at("configid"));
                     launchAsyncCheckFileInfo(_id, accessDetails, RequestVettingStations,
                                              RvsHighWatermark);
                 }
@@ -774,12 +784,14 @@ void ClientRequestDispatcher::handleIncomingMessage(SocketDisposition& dispositi
                     }
                 }
 #endif
+                if (!servedSync)
+                    HttpHelper::sendErrorAndShutdown(http::StatusCode::BadRequest, socket);
             }
             else
             {
                 FileServerRequestHandler::ResourceAccessDetails accessDetails;
-                COOLWSD::FileRequestHandler->handleRequest(request, requestDetails, message, socket,
-                                                           accessDetails);
+                servedSync = COOLWSD::FileRequestHandler->handleRequest(
+                    request, requestDetails, message, socket, accessDetails);
                 if (accessDetails.isValid())
                 {
                     LOG_ASSERT_MSG(
@@ -790,11 +802,7 @@ void ClientRequestDispatcher::handleIncomingMessage(SocketDisposition& dispositi
                     launchAsyncCheckFileInfo(_id, accessDetails, RequestVettingStations,
                                              RvsHighWatermark);
                 }
-                servedSync = true;
             }
-
-            if (!servedSync)
-                HttpHelper::sendErrorAndShutdown(http::StatusCode::BadRequest, socket);
         }
         else if (requestDetails.equals(RequestDetails::Field::Type, "cool") &&
                  requestDetails.equals(1, "adminws"))
@@ -927,7 +935,7 @@ void ClientRequestDispatcher::handleIncomingMessage(SocketDisposition& dispositi
         }
         else
         {
-            LOG_ERR("Unknown resource: " << requestDetails.toString());
+            LOG_WRN("Unknown resource: " << requestDetails.toString());
 
             // Bad request.
             HttpHelper::sendErrorAndShutdown(http::StatusCode::BadRequest, socket);
@@ -970,7 +978,8 @@ void ClientRequestDispatcher::handleIncomingMessage(SocketDisposition& dispositi
             socket->eraseFirstInputBytes(map._messageSize - map._headerSize);
         }
     }
-    if( servedSync && closeConnection && !socket->isClosed() )
+
+    if (servedSync && closeConnection && !socket->isShutdown())
     {
         LOG_DBG("Handled request: " << request.getURI()
                 << ", inBuf[sz " << preInBufferSz << " -> " << socket->getInBuffer().size()
@@ -983,7 +992,7 @@ void ClientRequestDispatcher::handleIncomingMessage(SocketDisposition& dispositi
         LOG_DBG("Handled request: " << request.getURI()
                 << ", inBuf[sz " << preInBufferSz << " -> " << socket->getInBuffer().size()
                 << ", rm " <<  (preInBufferSz-socket->getInBuffer().size())
-                << "], connection open " << !socket->isClosed());
+                << "], connection open " << !socket->isShutdown());
 
 #else // !MOBILEAPP
     Poco::Net::HTTPRequest request;
@@ -1111,6 +1120,8 @@ STATE_ENUM(CheckStatus,
     UnspecifiedError,
     ConnectionAborted,
     CertificateValidation,
+    SelfSignedCertificate,
+    ExpiredCertificate,
     SslHandshakeFail,
     MissingSsl,
     NotHttps,
@@ -1210,7 +1221,7 @@ bool ClientRequestDispatcher::handleWopiAccessCheckRequest(const Poco::Net::HTTP
         jsonResponse.set("X-Content-Type-Options", "nosniff");
 
         socket->sendAndShutdown(jsonResponse);
-        LOG_INF("Wopi Access Check request, result" << nameShort(result));
+        LOG_INF("Wopi Access Check request, result: " << nameShort(result));
     };
 
     if (scheme.empty())
@@ -1254,7 +1265,7 @@ bool ClientRequestDispatcher::handleWopiAccessCheckRequest(const Poco::Net::HTTP
     }
 
     http::Request httpRequest(pathAndQuery.empty() ? "/" : pathAndQuery);
-    auto httpProbeSession = http::Session::create(host, protocol, port);
+    auto httpProbeSession = http::Session::create(std::move(host), protocol, port);
     httpProbeSession->setTimeout(std::chrono::seconds(2));
 
     httpProbeSession->setConnectFailHandler(
@@ -1269,16 +1280,24 @@ bool ClientRequestDispatcher::handleWopiAccessCheckRequest(const Poco::Net::HTTP
                 status = CheckStatus::HostNotFound;
             }
 
+#if ENABLE_SSL
             if (result == net::AsyncConnectResult::SSLHandShakeFailure) {
                 status = CheckStatus::SslHandshakeFail;
             }
 
-            if (!probeSession->getSslVerifyMessage().empty())
+            auto sslResult = probeSession->getSslVerifyResult();
+            if (sslResult != X509_V_OK)
             {
-                status = CheckStatus::CertificateValidation;
-
-                LOG_DBG("Result ssl: " << probeSession->getSslVerifyMessage());
+                if (sslResult == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT) {
+                    status = CheckStatus::SelfSignedCertificate;
+                } else if (sslResult == X509_V_ERR_CERT_HAS_EXPIRED) {
+                    status = CheckStatus::ExpiredCertificate;
+                } else {
+                    status = CheckStatus::CertificateValidation;
+                    LOG_DBG("Result ssl: " << probeSession->getSslVerifyMessage());
+                }
             }
+#endif
 
             sendResult(status);
     });
@@ -1313,29 +1332,28 @@ bool ClientRequestDispatcher::handleWopiAccessCheckRequest(const Poco::Net::HTTP
         if (result == net::AsyncConnectResult::UnknownHostError)
             status = CheckStatus::HostNotFound;
 
-        if (protocol == http::Session::Protocol::HttpSsl && lastErrno == ENOTCONN)
-            status = CheckStatus::MissingSsl;
-
         if (result == net::AsyncConnectResult::ConnectionError)
             status = CheckStatus::ConnectionAborted;
 
-        // TODO complete error coverage
-        // certificate errors
-        // self-signed
-        // expired
-
-        if (!probeSession->getSslVerifyMessage().empty())
+#if ENABLE_SSL
+        auto sslResult = probeSession->getSslVerifyResult();
+        if (sslResult != X509_V_OK)
         {
-            status = CheckStatus::CertificateValidation;
-
-            LOG_DBG("Result ssl: " << probeSession->getSslVerifyMessage());
+            if (sslResult == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT) {
+                // means we aren't checking certificate or we'd have a connectionFail
+                status = CheckStatus::Ok;
+            } else {
+                status = CheckStatus::CertificateValidation;
+                LOG_WRN("Unexpected failed Result ssl in a connection success: " << probeSession->getSslVerifyMessage());
+            }
         }
+#endif
 
         sendResult(status);
     };
 
     httpProbeSession->setFinishedHandler(std::move(finishHandler));
-    httpProbeSession->asyncRequest(httpRequest, *COOLWSD::getWebServerPoll());
+    httpProbeSession->asyncRequest(httpRequest, COOLWSD::getWebServerPoll());
 
     return true;
 }
@@ -1797,10 +1815,7 @@ bool ClientRequestDispatcher::handlePostRequest(const RequestDetails& requestDet
         {
             LOG_WRN(
                 "Conversion requests not allowed from this address: " << socket->clientAddress());
-            http::Response httpResponse(http::StatusCode::Forbidden);
-            httpResponse.set("Content-Length", "0");
-            socket->sendAndShutdown(httpResponse);
-            socket->ignoreInput();
+            HttpHelper::sendErrorAndShutdown(http::StatusCode::Forbidden, socket);
             return true;
         }
 
@@ -1901,7 +1916,8 @@ bool ClientRequestDispatcher::handlePostRequest(const RequestDetails& requestDet
         }
         return false;
     }
-    else if (requestDetails.equals(2, "insertfile"))
+
+    if (requestDetails.equals(2, "insertfile"))
     {
         LOG_INF("Insert file request.");
 
@@ -2011,19 +2027,16 @@ bool ClientRequestDispatcher::handlePostRequest(const RequestDetails& requestDet
             // Instruct browsers to download the file, not display it
             // with the exception of SVG where we need the browser to
             // actually show it.
-            const std::string contentType = getContentType(fileName);
-            response.setContentType(contentType);
+            response.setContentType(getContentType(fileName));
             if (serveAsAttachment)
                 response.set("Content-Disposition", "attachment; filename=\"" + fileName + '"');
 
-#if !MOBILEAPP
             if (COOLWSD::WASMState != COOLWSD::WASMActivationState::Disabled)
             {
                 response.add("Cross-Origin-Opener-Policy", "same-origin");
                 response.add("Cross-Origin-Embedder-Policy", "require-corp");
                 response.add("Cross-Origin-Resource-Policy", "cross-origin");
             }
-#endif // !MOBILEAPP
 
             try
             {
@@ -2123,8 +2136,8 @@ bool ClientRequestDispatcher::handleClientProxyRequest(const Poco::Net::HTTPRequ
 
     // Request a kit process for this doc.
     std::pair<std::shared_ptr<DocumentBroker>, std::string> pair
-        = findOrCreateDocBroker(DocumentBroker::ChildType::Interactive, url, docKey, _id, uriPublic,
-                              /*mobileAppDocId=*/0, /*wopiFileInfo=*/nullptr);
+        = findOrCreateDocBroker(DocumentBroker::ChildType::Interactive, url, docKey, /*TODO*/ "",
+                              _id, uriPublic, /*mobileAppDocId=*/0);
     auto docBroker = pair.first;
 
     if (!docBroker)
@@ -2307,6 +2320,11 @@ std::string ClientRequestDispatcher::getDiscoveryXML()
             elem->setAttribute(urlsrc, uriValue);
         }
 
+        if (parent && parent->getAttribute("name") == "Settings")
+        {
+            elem->setAttribute(urlsrc, uriBaseValue + SETTING_IFRAME_END_POINT);
+        }
+
         // Set the View extensions cache as well.
         if (elem->getAttribute("name") == "edit")
         {
@@ -2416,6 +2434,9 @@ static std::string getCapabilitiesJson(bool convertToAvailable)
     // Set that this is a proxy.php-enabled instance
     capabilities->set("hasProxyPrefix", COOLWSD::IsProxyPrefixEnabled);
 
+    // Set if this instance supports Setting Iframe
+    capabilities->set("hasSettingIframeSupport", true);
+
     // Set if this instance supports Zotero
     capabilities->set("hasZoteroSupport", ConfigUtil::getBool("zotero.enable", true));
 
@@ -2426,6 +2447,9 @@ static std::string getCapabilitiesJson(bool convertToAvailable)
     // Set if this instance supports document signing.
     capabilities->set("hasDocumentSigningSupport",
                       ConfigUtil::getBool("document_signing.enable", true));
+
+    // Advertise wopiAccessCheck endpoint availability
+    capabilities->set("hasWopiAccessCheck", true);
 
     const std::string serverName = ConfigUtil::getString("indirection_endpoint.server_name", "");
     if (const char* podName = std::getenv("POD_NAME"))

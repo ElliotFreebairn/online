@@ -1086,7 +1086,7 @@ function setupToolbar(e) {
 			toolbar.showItem('cancelsearch', false);
 			L.DomUtil.addClass(searchInput, 'search-not-found');
 			$('#findthis').addClass('search-not-found');
-			map.resetSelection();
+			app.searchService.resetSelection();
 			setTimeout(function () {
 				$('#findthis').removeClass('search-not-found');
 				L.DomUtil.removeClass(searchInput, 'search-not-found');
@@ -1118,8 +1118,11 @@ function setupToolbar(e) {
 
 	if (map.options.wopi && L.Params.closeButtonEnabled && !window.mode.isMobile()) {
 		$('#closebuttonwrapper').css('display', 'block');
-		$('#closebutton').prop('title', _('Close document'));
-		map.uiManager.enableTooltip($('#closebutton'));
+		var button = L.DomUtil.get('closebutton');
+		if (button) {
+			button.setAttribute('data-cooltip', _('Close document'));
+			L.control.attachTooltipEventListener(button, map);
+		}
 	} else if (!L.Params.closeButtonEnabled) {
 		$('#closebuttonwrapper').hide();
 		$('#closebuttonwrapperseparator').hide();

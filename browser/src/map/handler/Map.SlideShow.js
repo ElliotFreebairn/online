@@ -46,7 +46,7 @@ L.Map.SlideShow = L.Handler.extend({
 			return;
 		}
 
-		if (window.ThisIsTheiOSApp || window.ThisIsTheAndroidApp) {
+		if (window.ThisIsTheAndroidApp) {
 			window.postMobileMessage('SLIDESHOW');
 			return;
 		}
@@ -133,7 +133,7 @@ L.Map.SlideShow = L.Handler.extend({
 		L.DomUtil.remove(this._slideShow);
 		this._slideShow = null;
 		// #7102 on exit from fullscreen we don't get a 'focus' event
-		// in chome so a later second attempt at launching a presentation
+		// in Chrome so a later second attempt at launching a presentation
 		// fails
 		this._map.focus();
 	},

@@ -32,7 +32,7 @@
 class WopiStorage : public StorageBase
 {
 public:
-    class WOPIFileInfo : public FileInfo
+    class WOPIFileInfo final : public FileInfo
     {
         void init();
 
@@ -53,6 +53,7 @@ public:
         const std::string& getUserExtraInfo() const { return _userExtraInfo; }
         const std::string& getUserPrivateInfo() const { return _userPrivateInfo; }
         const std::string& getServerPrivateInfo() const { return _serverPrivateInfo; }
+        const std::string& getUserSettingsUri() const { return _userSettingsUri; }
         const std::string& getWatermarkText() const { return _watermarkText; }
         const std::string& getTemplateSaveAs() const { return _templateSaveAs; }
         const std::string& getTemplateSource() const { return _templateSource; }
@@ -80,10 +81,12 @@ public:
         bool getEnableInsertRemoteFile() const { return _enableInsertRemoteFile; }
         bool getDisableInsertLocalImage() const { return _disableInsertLocalImage; }
         bool getEnableRemoteLinkPicker() const { return _enableRemoteLinkPicker; }
+        bool getEnableRemoteAIContent() const { return _enableRemoteAIContent; }
         bool getEnableShare() const { return _enableShare; }
         bool getSupportsRename() const { return _supportsRename; }
         bool getSupportsLocks() const { return _supportsLocks; }
         bool getUserCanRename() const { return _userCanRename; }
+        bool getUserCanOnlyComment() const { return _userCanOnlyComment; }
 
         const std::optional<bool> getIsAdminUser() const { return _isAdminUser; }
         const std::string& getIsAdminUserError() const { return _isAdminUserError; }
@@ -105,6 +108,8 @@ public:
         std::string _userPrivateInfo;
         /// Private info per server, for API keys and other non-public information.
         std::string _serverPrivateInfo;
+        /// Uri to get settings json for this user, for autotext location, etc.
+        std::string _userSettingsUri;
         /// In case a watermark has to be rendered on each tile.
         std::string _watermarkText;
         /// In case we want to use this file as a template, it should be first re-saved under this name (using PutRelativeFile).
@@ -121,12 +126,16 @@ public:
         /// If set to "mobile" | "tablet" | "desktop", will be hidden on a specified device
         /// (may be joint, delimited by commas eg. "mobile,tablet")
         std::string _hideUserList;
+        /// error code if integration does not use isAdminUser field properly
+        std::string _isAdminUserError;
         /// If we should disable change-tracking visibility by default (meaningful at loading).
         TriState _disableChangeTrackingShow = WOPIFileInfo::TriState::Unset;
         /// If we should disable change-tracking ability by default (meaningful at loading).
         TriState _disableChangeTrackingRecord = WOPIFileInfo::TriState::Unset;
         /// If we should hide change-tracking commands for this user.
         TriState _hideChangeTrackingControls = WOPIFileInfo::TriState::Unset;
+        /// If user is considered as admin on the integrator side
+        std::optional<bool> _isAdminUser = std::nullopt;
         /// If user accessing the file has write permission
         bool _userCanWrite = false;
         /// Hide print button from UI
@@ -161,6 +170,8 @@ public:
         bool _disableInsertLocalImage = false;
         /// If set to true, users can access the remote link picker functionality
         bool _enableRemoteLinkPicker = false;
+        /// If set to true, users can insert remote AI-generated content
+        bool _enableRemoteAIContent = false;
         /// If set to true, users can access the file share functionality
         bool _enableShare = false;
         /// If WOPI host supports locking
@@ -169,11 +180,8 @@ public:
         bool _supportsRename = false;
         /// If user is allowed to rename the document
         bool _userCanRename = false;
-        /// If user is considered as admin on the integrator side
-        std::optional<bool> _isAdminUser = std::nullopt;
-
-        /// error code if integration does not use isAdminUser field properly
-        std::string _isAdminUserError;
+        /// If user is limited to only writing/modifiyng comments
+        bool _userCanOnlyComment = false;
     };
 
     WopiStorage(const Poco::URI& uri, const std::string& localStorePath,
@@ -204,7 +212,7 @@ public:
                                      const Attributes& attribs) override;
 
     void updateLockStateAsync(const Authorization& auth, LockContext& lockCtx, LockState lock,
-                              const Attributes& attribs, SocketPoll& socketPoll,
+                              const Attributes& attribs, const std::shared_ptr<SocketPoll>& socketPoll,
                               const AsyncLockStateCallback& asyncLockStateCallback) override;
 
     /// uri format: http://server/<...>/wopi*/files/<id>/content
@@ -214,7 +222,8 @@ public:
     std::size_t
     uploadLocalFileToStorageAsync(const Authorization& auth, LockContext& lockCtx,
                                   const std::string& saveAsPath, const std::string& saveAsFilename,
-                                  const bool isRename, const Attributes&, SocketPoll& socketPoll,
+                                  const bool isRename, const Attributes&,
+                                  const std::shared_ptr<SocketPoll>& socketPoll,
                                   const AsyncUploadCallback& asyncUploadCallback) override;
 
     /// Total time taken for making WOPI calls during uploading.
@@ -234,8 +243,8 @@ protected:
         const std::string filePathAnonym;
         const std::string uriAnonym;
         const std::string httpResponseReason;
-        const http::StatusCode httpResponseCode;
         const std::size_t size;
+        const http::StatusCode httpResponseCode;
         const bool isSaveAs;
         const bool isRename;
     };
@@ -245,14 +254,6 @@ protected:
                                                std::string responseString);
 
 private:
-    /// Initialize an HTTPRequest instance with the common settings and headers.
-    /// Older Poco versions don't support copying HTTPRequest objects, so we can't generate them.
-    void initHttpRequest(Poco::Net::HTTPRequest& request, const Poco::URI& uri,
-                         const Authorization& auth) const;
-
-    /// Create an http::Request with the common headers.
-    http::Request initHttpRequest(const Poco::URI& uri, const Authorization& auth) const;
-
     /// Download the document from the given URI.
     /// Does not add authorization tokens or any other logic.
     std::string downloadDocument(const Poco::URI& uriObject, const std::string& uriAnonym,

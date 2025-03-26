@@ -31,12 +31,10 @@ public:
     /// @param socket is the underlying Socket to the process.
     WSProcess(const std::string& name, const pid_t pid, const std::shared_ptr<StreamSocket>& socket,
               std::shared_ptr<WebSocketHandler> handler)
-        :
-
-        _name(name)
-        , _pid(pid)
+        : _name(name)
         , _ws(std::move(handler))
         , _socket(socket)
+        , _pid(pid)
     {
         LOG_INF(_name << " ctor [" << _pid << "].");
     }
@@ -182,9 +180,9 @@ protected:
 
 private:
     std::string _name;
-    std::atomic<pid_t> _pid; ///< The process-id, which can be access from different threads.
     std::shared_ptr<WebSocketHandler> _ws; // FIXME: should be weak ? ...
     std::weak_ptr<StreamSocket> _socket;
+    std::atomic<pid_t> _pid; ///< The process-id, which can be access from different threads.
 };
 
 /// A ChildProcess object represents a Kit process that hosts a document and manipulates the
@@ -198,10 +196,12 @@ public:
     /// @param socket is the underlying Socket to the child.
     template <typename T>
     ChildProcess(const pid_t pid, const std::string& jailId,
+                 const std::string& configId,
                  const std::shared_ptr<StreamSocket>& socket, const T& request)
         : WSProcess("ChildProcess", pid, socket,
                     std::make_shared<WebSocketHandler>(socket, request))
         , _jailId(jailId)
+        , _configId(configId)
         , _smapsFD(-1)
     {
         const int urpFromKitFD = socket->getIncomingFD(SharedFDType::URPFromKit);
@@ -253,6 +253,7 @@ public:
     void setDocumentBroker(const std::shared_ptr<DocumentBroker>& docBroker);
     std::shared_ptr<DocumentBroker> getDocumentBroker() const { return _docBroker.lock(); }
     const std::string& getJailId() const { return _jailId; }
+    const std::string& getConfigId() const { return _configId; }
     void setSMapsFD(int smapsFD) { _smapsFD = smapsFD; }
     int getSMapsFD() { return _smapsFD; }
 
@@ -263,6 +264,7 @@ public:
 
 private:
     const std::string _jailId;
+    const std::string _configId;
     std::weak_ptr<DocumentBroker> _docBroker;
     std::shared_ptr<StreamSocket> _urpFromKit;
     std::shared_ptr<StreamSocket> _urpToKit;

@@ -13,17 +13,21 @@
 
 #include "ClientSession.hpp"
 
+#include <filesystem>
 #include <ios>
+#include <map>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <memory>
 #include <unordered_map>
+#include <cctype>
 
 #include <Poco/Base64Decoder.h>
 #include <Poco/Net/HTTPResponse.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
+#include <Poco/JSON/Parser.h>
 
 #include "ConfigUtil.hpp"
 #include "DocumentBroker.hpp"
@@ -40,6 +44,7 @@
 #include <common/CommandControl.hpp>
 #include <wsd/TileDesc.hpp>
 #include <net/HttpHelper.hpp>
+#include <wopi/StorageConnectionManager.hpp>
 
 using namespace COOLProtocol;
 
@@ -70,30 +75,31 @@ ClientSession::ClientSession(
     const std::shared_ptr<DocumentBroker>& docBroker,
     const Poco::URI& uriPublic,
     const bool readOnly,
-    const RequestDetails &requestDetails) :
-    Session(ws, "ToClient-" + id, id, readOnly),
-    _docBroker(docBroker),
-    _uriPublic(uriPublic),
-    _auth(Authorization::create(uriPublic)),
-    _isDocumentOwner(false),
-    _state(SessionState::DETACHED),
-    _lastStateTime(std::chrono::steady_clock::now()),
-    _keyEvents(1),
-    _clientVisibleArea(0, 0, 0, 0),
-    _splitX(0),
-    _splitY(0),
-    _clientSelectedPart(-1),
-    _clientSelectedMode(0),
-    _tileWidthPixel(0),
-    _tileHeightPixel(0),
-    _tileWidthTwips(0),
-    _tileHeightTwips(0),
-    _kitViewId(-1),
-    _serverURL(requestDetails),
-    _isTextDocument(false),
-    _thumbnailSession(false),
-    _canonicalViewId(0),
-    _sentAudit(false)
+    const RequestDetails &requestDetails)
+        : Session(ws, "ToClient-" + id, id, readOnly)
+        , _uriPublic(uriPublic)
+        , _serverURL(requestDetails)
+        , _auth(Authorization::create(uriPublic))
+        , _docBroker(docBroker)
+        , _lastStateTime(std::chrono::steady_clock::now())
+        , _clientVisibleArea(0, 0, 0, 0)
+        , _keyEvents(1)
+        , _splitX(0)
+        , _splitY(0)
+        , _clientSelectedPart(-1)
+        , _clientSelectedMode(0)
+        , _tileWidthPixel(0)
+        , _tileHeightPixel(0)
+        , _tileWidthTwips(0)
+        , _tileHeightTwips(0)
+        , _kitViewId(-1)
+        , _canonicalViewId(CanonicalViewId::None)
+        , _state(SessionState::DETACHED)
+        , _isDocumentOwner(false)
+        , _isTextDocument(false)
+        , _thumbnailSession(false)
+        , _sentAudit(false)
+        , _sentBrowserSetting(false)
 {
     const std::size_t curConnections = ++COOLWSD::NumConnections;
     LOG_INF("ClientSession ctor [" << getName() << "] for URI: [" << _uriPublic.toString()
@@ -113,6 +119,8 @@ ClientSession::ClientSession(
     TraceEvent::emitOneRecordingIfEnabled("{\"name\":\"thread_name\",\"ph\":\"M\",\"args\":{\"name\":\"JS\"},\"pid\":"
                                           + std::to_string(getpid() + SYNTHETIC_COOL_PID_OFFSET)
                                           + ",\"tid\":1},\n");
+
+    _browserSettingsJSON = new Poco::JSON::Object();
 }
 
 // Can't take a reference in the constructor.
@@ -294,12 +302,7 @@ void ClientSession::handleClipboardRequest(DocumentBroker::ClipboardRequest     
             LOG_ERR("Unsupported Clipboard Request from socket #" << socket->getFD()
                                                                   << ". Terminating connection.");
 
-            http::Response httpResponse(http::StatusCode::Forbidden);
-            httpResponse.set("Content-Length", "0");
-            httpResponse.set("Connection", "close");
-            socket->send(httpResponse);
-            socket->closeConnection(); // Shutdown socket.
-            socket->ignoreInput();
+            HttpHelper::sendErrorAndShutdown(http::StatusCode::Forbidden, socket);
             return;
         }
 
@@ -568,8 +571,12 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                     LOG_WRN("For some reason the _performanceCounterEpoch is still zero, ignoring TRACEEVENT from cool as the timestamp would be garbage");
                     warnedOnce = true;
                 }
+
                 return false;
-            } else if (_performanceCounterEpoch < 1620000000000000ull || _performanceCounterEpoch > 2000000000000000ull)
+            }
+
+            if (_performanceCounterEpoch < 1620000000000000ull ||
+                _performanceCounterEpoch > 2000000000000000ull)
             {
                 static bool warnedOnce = false;
                 if (!warnedOnce)
@@ -577,6 +584,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                     LOG_WRN("For some reason the _performanceCounterEpoch is bogus, ignoring TRACEEVENT from cool as the timestamp would be garbage");
                     warnedOnce = true;
                 }
+
                 return false;
             }
 
@@ -682,6 +690,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
         LOG_TRC("UNO remote protocol message (from client): " << firstLine);
         return forwardToChild(std::string(buffer, length), docBroker);
     }
+
     if (tokens.equals(0, "coolclient"))
     {
         if (tokens.size() < 2)
@@ -858,19 +867,21 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     }
     else if (tokens.equals(0, "tile"))
     {
-        if (!(UnitWSD::isUnitTesting() ? true : getCanonicalViewId() != 0 && getCanonicalViewId() >= 1000))
+        int canonicalViewId = to_underlying(getCanonicalViewId());
+        if (!(UnitWSD::isUnitTesting() ? true : canonicalViewId != 0 && canonicalViewId >= 1000))
         {
             LOG_WRN("Got tile request for session [" << getId() << "] on document [" << docBroker->getDocKey()
-                                << "] with invalid view ID [" << getCanonicalViewId() << "].");
+                                << "] with invalid view ID [" << canonicalViewId << "].");
         }
         return sendTile(buffer, length, tokens, docBroker);
     }
     else if (tokens.equals(0, "tilecombine"))
     {
-        if (!(UnitWSD::isUnitTesting() ? true : getCanonicalViewId() != 0 && getCanonicalViewId() >= 1000))
+        int canonicalViewId = to_underlying(getCanonicalViewId());
+        if (!(UnitWSD::isUnitTesting() ? true : canonicalViewId != 0 && canonicalViewId >= 1000))
         {
             LOG_WRN("Got tilecombine request for session [" << getId() << "] on document [" << docBroker->getDocKey()
-                                << "] with invalid view ID [" << getCanonicalViewId() << "].");
+                                << "] with invalid view ID [" << canonicalViewId << "].");
         }
         return sendCombinedTiles(buffer, length, tokens, docBroker);
     }
@@ -941,35 +952,35 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             logSyntaxErrorDetails(tokens, firstLine);
             return true;
         }
-        else
+
+        if (tokens.size() == 7)
         {
-            if (tokens.size() == 7)
+            int splitX;
+            int splitY;
+            if (!getTokenInteger(tokens[5], "splitx", splitX) ||
+                !getTokenInteger(tokens[6], "splity", splitY))
             {
-                int splitX, splitY;
-                if (!getTokenInteger(tokens[5], "splitx", splitX) ||
-                    !getTokenInteger(tokens[6], "splity", splitY))
-                {
-                    logSyntaxErrorDetails(tokens, firstLine);
-                    return true;
-                }
-
-                _splitX = splitX;
-                _splitY = splitY;
+                logSyntaxErrorDetails(tokens, firstLine);
+                return true;
             }
 
-            // Untrusted user input, make sure these are not negative.
-            if (width < 0)
-            {
-                width = 0;
-            }
-            if (height < 0)
-            {
-                height = 0;
-            }
-
-            _clientVisibleArea = Util::Rectangle(x, y, width, height);
-            return forwardToChild(std::string(buffer, length), docBroker);
+            _splitX = splitX;
+            _splitY = splitY;
         }
+
+        // Untrusted user input, make sure these are not negative.
+        if (width < 0)
+        {
+            width = 0;
+        }
+
+        if (height < 0)
+        {
+            height = 0;
+        }
+
+        _clientVisibleArea = Util::Rectangle(x, y, width, height);
+        return forwardToChild(std::string(buffer, length), docBroker);
     }
     else if (tokens.equals(0, "setclientpart"))
     {
@@ -982,11 +993,9 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                 logSyntaxErrorDetails(tokens, firstLine);
                 return false;
             }
-            else
-            {
-                _clientSelectedPart = temp;
-                return forwardToChild(std::string(buffer, length), docBroker);
-            }
+
+            _clientSelectedPart = temp;
+            return forwardToChild(std::string(buffer, length), docBroker);
         }
     }
     else if (tokens.equals(0, "selectclientpart"))
@@ -1002,10 +1011,8 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                 sendTextFrameAndLogError("error: cmd=selectclientpart kind=syntax");
                 return false;
             }
-            else
-            {
-                return forwardToChild(std::string(buffer, length), docBroker);
-            }
+
+            return forwardToChild(std::string(buffer, length), docBroker);
         }
     }
     else if (tokens.equals(0, "moveselectedclientparts"))
@@ -1019,17 +1026,18 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                 sendTextFrameAndLogError("error: cmd=moveselectedclientparts kind=syntax");
                 return false;
             }
-            else
-            {
-                if (isEditable())
-                    docBroker->updateLastModifyingActivityTime();
-                return forwardToChild(std::string(buffer, length), docBroker);
-            }
+
+            if (isEditable())
+                docBroker->updateLastModifyingActivityTime();
+            return forwardToChild(std::string(buffer, length), docBroker);
         }
     }
     else if (tokens.equals(0, "clientzoom"))
     {
-        int tilePixelWidth, tilePixelHeight, tileTwipWidth, tileTwipHeight;
+        int tilePixelWidth;
+        int tilePixelHeight;
+        int tileTwipWidth;
+        int tileTwipHeight;
         if (tokens.size() < 5 ||
             !getTokenInteger(tokens[1], "tilepixelwidth", tilePixelWidth) ||
             !getTokenInteger(tokens[2], "tilepixelheight", tilePixelHeight) ||
@@ -1041,14 +1049,12 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             logSyntaxErrorDetails(tokens, firstLine);
             return true;
         }
-        else
-        {
-            _tileWidthPixel = tilePixelWidth;
-            _tileHeightPixel = tilePixelHeight;
-            _tileWidthTwips = tileTwipWidth;
-            _tileHeightTwips = tileTwipHeight;
-            return forwardToChild(std::string(buffer, length), docBroker);
-        }
+
+        _tileWidthPixel = tilePixelWidth;
+        _tileHeightPixel = tilePixelHeight;
+        _tileWidthTwips = tileTwipWidth;
+        _tileHeightTwips = tileTwipHeight;
+        return forwardToChild(std::string(buffer, length), docBroker);
     }
     else if (tokens.equals(0, "tileprocessed"))
     {
@@ -1130,6 +1136,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                 // Child will handle this case
             }
         }
+
         return forwardToChild(firstLine, docBroker);
     }
     else if (tokens.equals(0, "formfieldevent") ||
@@ -1310,7 +1317,17 @@ bool ClientSession::_handleInput(const char *buffer, int length)
 #endif
 
         if (tokens.equals(0, "key"))
+        {
             _keyEvents++;
+
+            // Suppress Ctrl+q, which exits Core immediately.
+            // key type=input char=0 key=8720
+            if (tokens.size() == 4 && tokens.equals(2, "char=0") && tokens.equals(3, "key=8720"))
+            {
+                LOG_DBG("Suppressing Ctrl+q");
+                return true;
+            }
+        }
 
         if (isEditable() && COOLProtocol::tokenIndicatesDocumentModification(tokens))
         {
@@ -1322,10 +1339,8 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             const std::string dummyFrame = "dummymsg";
             return forwardToChild(dummyFrame, docBroker);
         }
-        else
-        {
-            return forwardToChild(std::string(buffer, length), docBroker);
-        }
+
+        return forwardToChild(std::string(buffer, length), docBroker);
     }
     else if (tokens.equals(0, "attemptlock"))
     {
@@ -1344,6 +1359,27 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     {
         Admin::instance().routeTokenSanityCheck();
     }
+    else if (tokens.equals(0, "browsersetting") && tokens.size() >= 3)
+    {
+        std::string action;
+        getTokenString(tokens[1], "action", action);
+        if (action == "update")
+        {
+            std::string json;
+            getTokenString(tokens[2], "json", json);
+            updateBrowserSettingsJSON(json);
+            COOLWSD::syncUsersBrowserSettings(getUserId(), docBroker->getPid(), json);
+            try
+            {
+                uploadBrowserSettingsToWopiHost();
+            }
+            catch (const std::exception& exc)
+            {
+                LOG_WRN("Failed to upload browsersetting json for session ["
+                        << getId() << ']');
+            }
+        }
+    }
 #endif
     else
     {
@@ -1352,6 +1388,129 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     }
 
     return false;
+}
+
+#if !MOBILEAPP
+void ClientSession::uploadBrowserSettingsToWopiHost()
+{
+    const Authorization& auth = getAuthorization();
+    Poco::URI uriObject = DocumentBroker::getPresetUploadBaseUrl(_uriPublic);
+
+    const std::string& filePath = "/settings/userconfig/browsersetting/browsersetting.json";
+    uriObject.addQueryParameter("fileId", filePath);
+    auth.authorizeURI(uriObject);
+
+    const std::string& uriAnonym = COOLWSD::anonymizeUrl(uriObject.toString());
+
+    auto httpRequest = StorageConnectionManager::createHttpRequest(uriObject, auth);
+    httpRequest.setVerb(http::Request::VERB_POST);
+    auto httpSession = StorageConnectionManager::getHttpSession(uriObject);
+
+    std::ostringstream jsonStream;
+    _browserSettingsJSON->stringify(jsonStream, 2);
+    httpRequest.setBody(jsonStream.str(), "application/json; charset=utf-8");
+
+    http::Session::FinishedCallback finishedCallback =
+        [this, uriAnonym](const std::shared_ptr<http::Session>& wopiSession)
+    {
+        wopiSession->asyncShutdown();
+
+        const std::shared_ptr<const http::Response> httpResponse = wopiSession->response();
+        const http::StatusLine statusLine = httpResponse->statusLine();
+        if (statusLine.statusCode() != http::StatusCode::OK)
+        {
+            LOG_ERR("Failed to upload updated browsersetting to wopiHost["
+                    << uriAnonym << "] with status[" << statusLine.reasonPhrase() << ']');
+            return;
+        }
+        LOG_TRC("Successfully uploaded browsersetting to wopiHost");
+    };
+
+    LOG_DBG("Uploading browsersetting json [" << jsonStream.str() << "] to wopiHost[" << uriAnonym
+                                              << ']');
+    httpSession->setFinishedHandler(std::move(finishedCallback));
+    httpSession->asyncRequest(httpRequest, COOLWSD::getWebServerPoll());
+}
+
+void ClientSession::updateBrowserSettingsJSON(const std::string& json)
+{
+    Poco::JSON::Parser parser;
+    auto result = parser.parse(json);
+    auto extractedObject= result.extract<Poco::JSON::Object::Ptr>();
+    for (const auto& key : extractedObject->getNames())
+    {
+        const std::string& value = extractedObject->get(key);
+        std::vector<std::string> vec = Util::splitStringToVector(key, '.');
+        if (vec.size() == 2)
+        {
+            const std::string& parentKey = vec[0];
+            const std::string& childKey = vec[1];
+            if (!childKey.empty() && !parentKey.empty())
+            {
+                Poco::JSON::Object::Ptr jsonObject;
+                if (_browserSettingsJSON->has(parentKey))
+                    jsonObject = _browserSettingsJSON->getObject(parentKey);
+                else
+                    jsonObject = new Poco::JSON::Object();
+
+                jsonObject->set(childKey, value);
+                _browserSettingsJSON->set(parentKey, jsonObject);
+            }
+        }
+        else
+        {
+            _browserSettingsJSON->set(key, value);
+        }
+    }
+}
+#endif
+
+void ClientSession::overrideDocOption()
+{
+    if (!_sentBrowserSetting)
+    {
+        LOG_DBG("Browser settings not fetched, skipping DocOption override.");
+        return;
+    }
+
+    std::string spellOnline, darkTheme, darkBackgroundForTheme, accessibilityState;
+    JsonUtil::findJSONValue(_browserSettingsJSON, "spellOnline", spellOnline);
+    JsonUtil::findJSONValue(_browserSettingsJSON, "darkTheme", darkTheme);
+    JsonUtil::findJSONValue(_browserSettingsJSON, "accessibilityState", accessibilityState);
+    Poco::JSON::Object::Ptr darkBackgroundObj =
+        _browserSettingsJSON->getObject("darkBackgroundForTheme");
+
+    // follow darkTheme preference if darkBackgroundForTheme is not set
+    if (darkBackgroundObj.isNull())
+        setDarkBackground(darkTheme);
+    else
+        JsonUtil::findJSONValue(darkBackgroundObj, darkTheme == "true" ? "dark" : "light",
+                                darkBackgroundForTheme);
+
+    if (!darkTheme.empty())
+    {
+        setDarkTheme(darkTheme);
+        LOG_DBG("Overriding parsed docOption darkTheme[" << darkTheme << ']');
+    }
+
+    if (!darkBackgroundForTheme.empty())
+    {
+        setDarkBackground(darkBackgroundForTheme);
+        LOG_DBG("Overriding parsed docOption darkBackgroundForTheme[" << darkBackgroundForTheme
+                                                                      << ']');
+    }
+
+    if (!spellOnline.empty())
+    {
+        setSpellOnline(spellOnline);
+        LOG_DBG("Overriding parsed docOption spellOnline[" << spellOnline << ']');
+    }
+
+    if (!accessibilityState.empty())
+    {
+        setAccessibilityState(accessibilityState == "true" ? true : false);
+        LOG_DBG("Overriding parsed docOption accessibilityState[" << accessibilityState << ']');
+    }
 }
 
 bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
@@ -1369,9 +1528,10 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
     LOG_INF("Requesting document load from child.");
     try
     {
-        std::string timestamp, doctemplate;
+        std::string timestamp;
         int loadPart = -1;
-        parseDocOptions(tokens, loadPart, timestamp, doctemplate);
+        parseDocOptions(tokens, loadPart, timestamp);
+        overrideDocOption();
 
         std::ostringstream oss;
         oss << "load url=" << docBroker->getPublicUri().toString();
@@ -1487,6 +1647,11 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
         {
             oss << " macroSecurityLevel="
                 << ConfigUtil::getConfigValue<int>("security.macro_security_level", 1);
+        }
+
+        if (!getInitialClientVisibleArea().empty())
+        {
+            oss << " clientvisiblearea=" << getInitialClientVisibleArea();
         }
 
         if (ConfigUtil::getConfigValue<bool>("accessibility.enable", false))
@@ -1641,7 +1806,7 @@ bool ClientSession::sendCombinedTiles(const char* /*buffer*/, int /*length*/, co
     try
     {
         TileCombined tileCombined = TileCombined::parse(tokens);
-        tileCombined.setNormalizedViewId(getCanonicalViewId());
+        tileCombined.setCanonicalViewId(getCanonicalViewId());
         if (tileCombined.hasDuplicates())
         {
             LOG_ERR("Dangerous, tilecombine with duplicates is not acceptable");
@@ -1845,14 +2010,14 @@ void ClientSession::postProcessCopyPayload(const std::shared_ptr<Message>& paylo
                     origin = "</div>";
                     data.insert(data.begin() + pos, origin.begin(), origin.end());
                 }
+
                 return true;
             }
-            else
-            {
-                LOG_DBG("Missing <body> in textselectioncontent/clipboardcontent payload: "
-                        << Util::dumpHex(data));
-                return false;
-            }
+
+            LOG_DBG("Missing <body> in textselectioncontent/clipboardcontent payload: "
+                    << Util::dumpHex(data));
+            return false;
+
         });
 }
 
@@ -1962,7 +2127,7 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
             }
             catch (const std::exception& exception)
             {
-                LOG_ERR("unocommandresult parsing failure: " << exception.what());
+                LOG_ERR("Failed to handle [" << firstLine << "]: " << exception.what());
             }
         }
         else
@@ -2243,6 +2408,7 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
             httpResponse.add("Content-Type", "application/octet-stream");
             httpResponse.add("X-Content-Type-Options", "nosniff");
             httpResponse.add("X-COOL-Clipboard", "true");
+            httpResponse.add("Cache-Control", "no-cache");
             httpResponse.set("Connection", "close");
             socket->send(httpResponse);
 
@@ -2310,10 +2476,8 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
                         forwardToClient(std::make_shared<Message>(msg, Message::Dir::Out));
                         return true;
                     }
-                    else
-                    {
-                        LOG_ERR("Invalid embeddedmedia json without id: " << json);
-                    }
+
+                    LOG_ERR("Invalid embeddedmedia json without id: " << json);
                 }
             }
         }
@@ -2333,7 +2497,7 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
         if (getTokenInteger(tokens[1], "viewid", viewId) &&
             getTokenInteger(tokens[2], "canonicalid", canonicalId))
         {
-            _canonicalViewId = canonicalId;
+            _canonicalViewId = CanonicalViewId(canonicalId);
         }
     }
 #if ENABLE_FEATURE_LOCK || ENABLE_FEATURE_RESTRICTION
@@ -2360,24 +2524,28 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
         }
         else if (tokens.equals(0, "loaded:"))
         {
-            setState(ClientSession::SessionState::LIVE);
-
-            if (firstLine.find("isfirst=true") != std::string::npos)
+            // We expect to be in the Loading state, as set in
+            // DocumentBroker::addSessionInternal().
+            if (_state == ClientSession::SessionState::LOADING)
             {
-                // The document has just loaded.
-                docBroker->setInteractive(false);
-                docBroker->setLoaded();
+                setState(ClientSession::SessionState::LIVE);
 
-                // Wopi post load actions.
-                if (_wopiFileInfo && !_wopiFileInfo->getTemplateSource().empty())
+                if (firstLine.find("isfirst=true") != std::string::npos)
                 {
-                    LOG_DBG("Uploading template [" << _wopiFileInfo->getTemplateSource()
-                                                   << "] to storage after loading.");
-                    docBroker->uploadAfterLoadingTemplate(client_from_this());
-                }
-            }
+                    // The document has just loaded.
+                    docBroker->setInteractive(false);
+                    docBroker->setLoaded();
 
-            docBroker->onViewLoaded(client_from_this());
+                    // Wopi post load actions.
+                    if (_wopiFileInfo && !_wopiFileInfo->getTemplateSource().empty())
+                    {
+                        LOG_DBG("Uploading template [" << _wopiFileInfo->getTemplateSource()
+                                                       << "] to storage after loading.");
+                        docBroker->uploadAfterLoadingTemplate(client_from_this());
+                    }
+                }
+
+                docBroker->onViewLoaded(client_from_this());
 
 #if !MOBILEAPP
             Admin::instance().setViewLoadDuration(
@@ -2385,6 +2553,12 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - _viewLoadStart));
 #endif
+            }
+            else
+            {
+                LOG_WRN("Document loaded while we are not loading. Likely the client gave up and "
+                        "abandoned the document");
+            }
         }
         else if (tokens.equals(0, "status:"))
         {
@@ -2889,9 +3063,12 @@ void ClientSession::dumpState(std::ostream& os)
 
     if (_protocol)
     {
-        uint64_t sent = 0, recv = 0;
+        uint64_t sent = 0;
+        uint64_t recv = 0;
         _protocol->getIOStats(sent, recv);
-        os << "\n\t\tsent/keystroke: " << (double)sent/_keyEvents << " bytes";
+        os << "\n\t\tsent: " << sent / 1024 << " Kbytes";
+        os << "\n\t\trecv: " << recv / 1024 << " Kbytes";
+        os << "\n\t\tsent/keystroke: " << sent / 1024. / _keyEvents << " Kbytes";
     }
 
     os << "\n\t\tonFlyUpperLimit: " << getTilesOnFlyUpperLimit();
@@ -2929,6 +3106,7 @@ void ClientSession::handleTileInvalidation(const std::string& message,
        _tileWidthTwips == 0 || _tileHeightTwips == 0 ||
        (_clientSelectedPart == -1 && !_isTextDocument))
     {
+        LOG_TRC("No visible area received yet - skip invalidation");
         return;
     }
 
@@ -2968,7 +3146,7 @@ void ClientSession::handleTileInvalidation(const std::string& message,
     if( part == -1 ) // If no part is specified we use the part used by the client
         part = _clientSelectedPart;
 
-    int normalizedViewId = getCanonicalViewId();
+    CanonicalViewId canonicalViewId = getCanonicalViewId();
 
     std::vector<TileDesc> invalidTiles;
     if((part == _clientSelectedPart && mode == _clientSelectedMode) || _isTextDocument)
@@ -2988,7 +3166,7 @@ void ClientSession::handleTileInvalidation(const std::string& message,
                     Util::Rectangle tileRect (j * _tileWidthTwips, i * _tileHeightTwips, _tileWidthTwips, _tileHeightTwips);
                     if(invalidateRect.intersects(tileRect))
                     {
-                        TileDesc desc(normalizedViewId, part, mode,
+                        TileDesc desc(canonicalViewId, part, mode,
                                       _tileWidthPixel, _tileHeightPixel,
                                       j * _tileWidthTwips, i * _tileHeightTwips,
                                       _tileWidthTwips, _tileHeightTwips, -1, 0, -1);
@@ -3027,7 +3205,7 @@ void ClientSession::handleTileInvalidation(const std::string& message,
     if(!invalidTiles.empty())
     {
         TileCombined tileCombined = TileCombined::create(invalidTiles);
-        tileCombined.setNormalizedViewId(normalizedViewId);
+        tileCombined.setCanonicalViewId(canonicalViewId);
         docBroker->handleTileCombinedRequest(tileCombined, false, client_from_this());
     }
 }
@@ -3151,7 +3329,7 @@ std::string ClientSession::processSVGContent(const std::string& svg)
     std::string::size_type pos = 0;
     for (;;)
     {
-        static const std::string prefix = "src=\"file:///tmp/";
+        constexpr std::string_view prefix = "src=\"file:///tmp/";
         const auto start = svg.find(prefix, pos);
         if (start == std::string::npos)
         {

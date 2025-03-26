@@ -39,8 +39,14 @@ void CheckFileInfo::checkFileInfo(int redirectLimit)
                                                            << httpRequest.header());
 
     http::Session::FinishedCallback finishedCallback =
-        [this, startTime, uriAnonym, redirectLimit](const std::shared_ptr<http::Session>& session)
+        [selfWeak = weak_from_this(), this, startTime, uriAnonym, redirectLimit](const std::shared_ptr<http::Session>& session)
     {
+        session->asyncShutdown();
+
+        std::shared_ptr<CheckFileInfo> selfLifecycle = selfWeak.lock();
+        if (!selfLifecycle)
+            return;
+
         _profileZone.end(); // Finish profiling.
 
         if (SigUtil::getShutdownRequestFlag())
@@ -58,7 +64,7 @@ void CheckFileInfo::checkFileInfo(int redirectLimit)
             statusCode == http::StatusCode::TemporaryRedirect ||
             statusCode == http::StatusCode::PermanentRedirect)
         {
-            if (redirectLimit)
+            if (redirectLimit != 0)
             {
                 const std::string location = httpResponse->get("Location");
                 LOG_INF("WOPI::CheckFileInfo redirect to URI [" << COOLWSD::anonymizeUrl(location)
@@ -68,11 +74,9 @@ void CheckFileInfo::checkFileInfo(int redirectLimit)
                 checkFileInfo(redirectLimit - 1);
                 return;
             }
-            else
-            {
-                LOG_WRN("WOPI::CheckFileInfo redirected too many times. Giving up on URI ["
-                        << uriAnonym << ']');
-            }
+
+            LOG_WRN("WOPI::CheckFileInfo redirected too many times. Giving up on URI [" << uriAnonym
+                                                                                        << ']');
         }
 
         std::chrono::milliseconds callDurationMs =
@@ -108,32 +112,30 @@ void CheckFileInfo::checkFileInfo(int redirectLimit)
             _state = State::Fail;
 
             if (httpResponse->statusLine().statusCode() == http::StatusCode::Forbidden)
-            {
                 LOG_ERR("Access denied to [" << uriAnonym << ']');
-                return;
-            }
-
-            LOG_ERR("Invalid URI or access denied to [" << uriAnonym << ']');
-            return;
-        }
-
-        if (JsonUtil::parseJSON(wopiResponse, _wopiInfo))
-        {
-            LOG_DBG("WOPI::CheckFileInfo ("
-                    << callDurationMs
-                    << "): " << (COOLWSD::AnonymizeUserData ? "obfuscated" : wopiResponse));
-
-            _state = State::Pass;
+            else
+                LOG_ERR("Invalid URI or access denied to [" << uriAnonym << ']');
         }
         else
         {
-            _state = State::Fail;
+            if (parseResponseAndValidate(wopiResponse))
+            {
+                LOG_DBG("WOPI::CheckFileInfo ("
+                        << callDurationMs
+                        << "): " << (COOLWSD::AnonymizeUserData ? "obfuscated" : wopiResponse));
 
-            LOG_ERR("WOPI::CheckFileInfo ("
-                    << callDurationMs
-                    << ") failed or no valid JSON payload returned. Access denied. "
-                       "Original response: ["
-                    << COOLProtocol::getAbbreviatedMessage(wopiResponse) << ']');
+                _state = State::Pass;
+            }
+            else
+            {
+                _state = State::Fail;
+
+                LOG_ERR("WOPI::CheckFileInfo ("
+                        << callDurationMs
+                        << ") failed or no valid JSON payload returned. Access denied. "
+                           "Original response: ["
+                        << COOLProtocol::getAbbreviatedMessage(wopiResponse) << ']');
+            }
         }
 
         if (_onFinishCallback)
@@ -145,8 +147,12 @@ void CheckFileInfo::checkFileInfo(int redirectLimit)
     _httpSession->setFinishedHandler(std::move(finishedCallback));
 
     http::Session::ConnectFailCallback connectFailCallback =
-        [this](const std::shared_ptr<http::Session>& /* httpSession */)
+        [selfWeak = weak_from_this(), this](const std::shared_ptr<http::Session>& /* httpSession */)
     {
+        std::shared_ptr<CheckFileInfo> selfLifecycle = selfWeak.lock();
+        if (!selfLifecycle)
+            return;
+
         _state = State::Fail;
         LOG_ERR("Failed to start an async CheckFileInfo request");
 
@@ -162,7 +168,7 @@ void CheckFileInfo::checkFileInfo(int redirectLimit)
     _state = State::Active;
 
     // Run the CheckFileInfo request on the WebServer Poll.
-    _httpSession->asyncRequest(httpRequest, *_poll);
+    _httpSession->asyncRequest(httpRequest, _poll);
 }
 
 void CheckFileInfo::checkFileInfoSync(int redirectionLimit)
@@ -187,6 +193,26 @@ void CheckFileInfo::checkFileInfoSync(int redirectionLimit)
     }
 }
 
+bool CheckFileInfo::parseResponseAndValidate(const std::string& response)
+{
+    if (JsonUtil::parseJSON(response, _wopiInfo))
+    {
+        // Validate the filename is sane.
+        std::string filename;
+        if (JsonUtil::findJSONValue(_wopiInfo, "BaseFileName", filename) &&
+            filename.find_first_of('/') == std::string::npos)
+        {
+            return true; // We're good.
+        }
+
+        LOG_ERR("BaseFileName should be the name of the file without a path, but is: [" << filename
+                                                                                        << ']');
+    }
+
+    _wopiInfo.reset(); // Clear the parsed JSON, if any.
+    return false;
+}
+
 std::unique_ptr<WopiStorage::WOPIFileInfo>
 CheckFileInfo::wopiFileInfo(const Poco::URI& uriPublic) const
 {
@@ -202,6 +228,9 @@ CheckFileInfo::wopiFileInfo(const Poco::URI& uriPublic) const
         JsonUtil::findJSONValue(_wopiInfo, "OwnerId", ownerId);
         JsonUtil::findJSONValue(_wopiInfo, "BaseFileName", filename);
         JsonUtil::findJSONValue(_wopiInfo, "LastModifiedTime", modifiedTime);
+
+        assert(filename.find_first_of('/') == std::string::npos &&
+               "Invalid BaseFileName, which had passed prior validation");
 
         Poco::JSON::Object::Ptr wopiInfo = _wopiInfo;
         wopiFileInfo = std::make_unique<WopiStorage::WOPIFileInfo>(

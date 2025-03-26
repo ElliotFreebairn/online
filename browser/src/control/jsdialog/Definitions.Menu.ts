@@ -286,6 +286,24 @@ menuDefinitions.set('PasteMenu', [
 	},
 ] as Array<MenuDefinition>);
 
+menuDefinitions.set('RecordTrackedChangesMenu', [
+	{
+		id: 'review-track-changes-off',
+		text: _('Off'),
+		uno: '.uno:TrackChanges?TrackChanges:bool=false',
+	},
+	{
+		id: 'review-track-changes-all-views',
+		text: _('All users'),
+		uno: '.uno:TrackChangesInAllViews',
+	},
+	{
+		id: 'review-track-changes-this-view',
+		text: _('This user'),
+		uno: '.uno:TrackChangesInThisView',
+	},
+] as Array<MenuDefinition>);
+
 menuDefinitions.set('ConditionalFormatMenu', [
 	{
 		text: _('Highlight cells with...'),
@@ -409,7 +427,7 @@ menuDefinitions.set('ColorPickerMenu', [
 menuDefinitions.set('LanguageStatusMenu', [
 	{ type: 'separator' },
 	{ type: 'separator' },
-	// dynamically updated in Constol.StatusBar
+	// dynamically updated in Control.StatusBar
 ] as Array<MenuDefinition>);
 
 menuDefinitions.set('Presentation', [

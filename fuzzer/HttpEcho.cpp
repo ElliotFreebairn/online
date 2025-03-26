@@ -8,18 +8,14 @@
 #include <config.h>
 
 #include <cstdlib>
-#include <iostream>
 
-#include "ConfigUtil.hpp"
 #include "Socket.hpp"
 #include <test/HttpTestServer.hpp>
 
 #include <Poco/URI.h>
 
 #include <chrono>
-#include <condition_variable>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <test/lokassert.hpp>
@@ -31,6 +27,7 @@
 #include <net/ServerSocket.hpp>
 #include <net/DelaySocket.hpp>
 #include <net/HttpRequest.hpp>
+#include <net/AsyncDNS.hpp>
 #include <FileUtil.hpp>
 #include <Util.hpp>
 #include <fuzzer/Common.hpp>
@@ -58,6 +55,7 @@ public:
         : _pollServerThread("HttpServerPoll")
         , _poller("HttpSynReqPoll")
     {
+        net::AsyncDNS::startAsyncDNS();
         _poller.runOnClientThread();
 
         std::map<std::string, std::string> logProperties;
@@ -101,6 +99,7 @@ public:
     {
         _pollServerThread.stop();
         _socket.reset();
+        net::AsyncDNS::stopAsyncDNS();
     }
 
     const std::string& localUri() const { return _localUri; }
@@ -113,17 +112,6 @@ public:
         _poller.removeSockets(); // We don't need stale sockets from prevous tests.
     };
 };
-
-#define CHECK(X)                                                                                   \
-    do                                                                                             \
-    {                                                                                              \
-        if (!(X))                                                                                  \
-        {                                                                                          \
-            fprintf(stderr, "Assertion: %s\n", #X);                                                \
-            assert(!(X));                                                                          \
-            __builtin_trap();                                                                      \
-        }                                                                                          \
-    } while (0)
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 {

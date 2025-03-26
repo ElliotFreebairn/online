@@ -7,7 +7,7 @@
  * at TextInput.
  */
 
-/* global app UNOKey UNOModifier */
+/* global app UNOKey UNOModifier TileManager */
 
 L.Map.mergeOptions({
 	keyboard: true,
@@ -374,7 +374,7 @@ L.Map.Keyboard = L.Handler.extend({
 	// printable characters. Those are handled by TextInput.js.
 	_onKeyDown: function (ev) {
 		if (this._map.uiManager.isUIBlocked()
-			|| ((this._map._docLayer._docType === 'presentation' || this._map._docLayer._docType === 'drawing') && this._map._docLayer._preview.partsFocused === true)
+			|| (this._map._docLayer && (this._map._docLayer._docType === 'presentation' || this._map._docLayer._docType === 'drawing') && this._map._docLayer._preview.partsFocused === true)
 		)
 			return;
 
@@ -400,8 +400,12 @@ L.Map.Keyboard = L.Handler.extend({
 		if (this._map.uiManager.isUIBlocked())
 			return;
 
+		if (ev.shortCutActivated === true) {
+			window.app.console.log('Shortcut for: ' + ev.code + ' already handled');
+			return;
+		}
+
 		if (window.KeyboardShortcuts.processEvent(app.UI.language.fromURL, ev)) {
-			ev.preventDefault();
 			return;
 		}
 		if (this._map.jsdialog
@@ -478,14 +482,18 @@ L.Map.Keyboard = L.Handler.extend({
 			return;
 		}
 
+		if (ev.code === 'NumpadDecimal') this._map.numPadDecimalPressed = true;
+		else this._map.numPadDecimalPressed = false;
+
+		var docLayer = this._map._docLayer;
+
 		// if any key is pressed, we stop the following other users
-		this._map.userList.followUser(this._map._docLayer._viewId, false);
+		if (docLayer) this._map.userList.followUser(docLayer._viewId, false);
 
 		if (window.KeyboardShortcuts.processEvent(app.UI.language.fromURL, ev)) {
-			ev.preventDefault();
+			ev.shortCutActivated = true;
 			return;
 		}
-		var docLayer = this._map._docLayer;
 		if (!keyEventFn && docLayer && docLayer.postKeyboardEvent) {
 			// default is to post keyboard events on the document
 			keyEventFn = L.bind(docLayer.postKeyboardEvent, docLayer);
@@ -562,7 +570,7 @@ L.Map.Keyboard = L.Handler.extend({
 		}
 
 		if (this._map.isEditMode()) {
-			docLayer._resetPreFetching();
+			TileManager.resetPreFetching();
 
 			if (this._ignoreKeyEvent(ev)) {
 				// key ignored
@@ -662,11 +670,6 @@ L.Map.Keyboard = L.Handler.extend({
 
 		// Control + INSERT
 		if (this._isCtrlKey(e) && e.keyCode === this.keyCodes.INSERT) {
-			return true;
-		}
-
-		// Control + Shift + I, open browser developper tools
-		if (this._isCtrlKey(e) && e.shiftKey && e.keyCode === this.keyCodes.I) {
 			return true;
 		}
 

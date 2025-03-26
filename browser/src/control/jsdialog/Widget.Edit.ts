@@ -34,14 +34,14 @@ type EditWidgetControl = {
 class EditWidget {
 	protected parentContainer: HTMLElement;
 	protected data: EditWidgetJSON;
-	protected builder: any;
+	protected builder: JSBuilder;
 	protected callback: JSDialogCallback;
 	protected edit: EditWidgetControl;
 
 	constructor(
 		parentContainer: HTMLElement,
 		data: EditWidgetJSON,
-		builder: any,
+		builder: JSBuilder,
 		callback: JSDialogCallback,
 	) {
 		this.parentContainer = parentContainer;
@@ -53,7 +53,7 @@ class EditWidget {
 	protected static buildImpl(
 		parentContainer: HTMLElement,
 		data: EditWidgetJSON,
-		builder: any,
+		builder: JSBuilder,
 	): EditWidgetControl {
 		const result: EditWidgetControl = { container: null, input: null };
 
@@ -73,6 +73,7 @@ class EditWidget {
 		edit.value = data.text;
 		edit.id = data.id + '-input';
 		edit.dir = 'auto';
+		edit.setAttribute('autocomplete', 'off');
 
 		result.input = edit;
 
@@ -135,7 +136,7 @@ class EditWidget {
 JSDialog.edit = function (
 	parentContainer: HTMLElement,
 	data: EditWidgetJSON,
-	builder: any,
+	builder: JSBuilder,
 	callback: JSDialogCallback,
 ) {
 	const widget = new EditWidget(parentContainer, data, builder, callback);

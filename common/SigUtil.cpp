@@ -13,6 +13,7 @@
 
 #include "SigUtil.hpp"
 #include "SigHandlerTrap.hpp"
+#include "Util.hpp"
 
 #if !defined(__ANDROID__) && !defined(__EMSCRIPTEN__)
 #  include <execinfo.h>
@@ -71,7 +72,7 @@ static std::atomic<bool> ForwardSigUsr2Flag(false); ///< Flags to forward SIG_US
 
 static std::atomic<size_t> ActivityStringIndex = 0;
 static std::string ActivityHeader;
-static std::array<std::atomic<char *>, 16> ActivityStrings;
+static std::array<std::atomic<char*>, 16> ActivityStrings{};
 static bool UnattendedRun = false;
 #if !MOBILEAPP
 static int SignalLogFD = STDERR_FILENO; ///< The FD where signalLogs are dumped.
@@ -84,6 +85,20 @@ static SigUtil::SigChildHandler SigChildHandle;
 
 namespace SigUtil
 {
+
+void uninitialize()
+{
+    for (size_t i = 0; i < ActivityStrings.size(); ++i)
+    {
+        char* old = ActivityStrings[i].exchange(nullptr);
+        free(old);
+    }
+
+#if !MOBILEAPP
+    free(VersionInfo);
+#endif
+}
+
 #ifndef IOS
 bool getShutdownRequestFlag() { return RunStateFlag >= RunState::ShutDown; }
 
@@ -91,8 +106,12 @@ bool getTerminationFlag() { return RunStateFlag >= RunState::Terminate; }
 
 void setTerminationFlag()
 {
-    // Set the forced-termination flag.
-    RunStateFlag = RunState::Terminate;
+    // While fuzzing, we never want to terminate.
+    if constexpr (!Util::isFuzzing())
+    {
+        // Set the forced-termination flag.
+        RunStateFlag = RunState::Terminate;
+    }
 
     if constexpr (!Util::isMobileApp())
     {

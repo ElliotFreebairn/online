@@ -60,17 +60,32 @@ bool StorageBase::FilesystemEnabled;
 
 #if !MOBILEAPP
 
-std::string StorageBase::getLocalRootPath() const
+namespace {
+
+std::string getLocalJailPath(const std::string& localStorePath, const std::string& jailPath)
 {
-    std::string localPath = _jailPath;
+    std::string localPath = jailPath;
     if (localPath[0] == '/')
     {
         // Remove the leading /
         localPath.erase(0, 1);
     }
 
-    return FileUtil::buildLocalPathToJail(COOLWSD::EnableMountNamespaces, _localStorePath, std::move(localPath));
+    return FileUtil::buildLocalPathToJail(COOLWSD::EnableMountNamespaces, localStorePath, std::move(localPath));
 }
+
+}
+
+std::string StorageBase::getLocalRootPath() const
+{
+    return getLocalJailPath(_localStorePath, _jailPath);
+}
+
+std::string StorageBase::getJailPresetsPath() const
+{
+    return getLocalJailPath(_localStorePath, JAILED_CONFIG_ROOT);
+}
+
 #endif
 
 void StorageBase::initialize()
@@ -349,7 +364,8 @@ std::string LocalStorage::downloadStorageFileToLocal(const Authorization& /*auth
 
 std::size_t LocalStorage::uploadLocalFileToStorageAsync(
     const Authorization& /*auth*/, LockContext& /*lockCtx*/, const std::string& /*saveAsPath*/,
-    const std::string& /*saveAsFilename*/, bool /*isRename*/, const Attributes&, SocketPoll&,
+    const std::string& /*saveAsFilename*/, bool /*isRename*/, const Attributes&,
+    const std::shared_ptr<SocketPoll>&,
     const AsyncUploadCallback& asyncUploadCallback)
 {
     const std::string path = getUri().getPath();

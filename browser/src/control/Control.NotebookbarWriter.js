@@ -27,6 +27,7 @@ var tableTabName = 'Table';
 var drawTabName = 'Draw';
 var viewTabName = 'View';
 var helpTabName = 'Help';
+var formulaTabName = 'Formula';
 
 L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 
@@ -106,44 +107,50 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'id': helpTabName + '-tab-label',
 				'name': helpTabName,
 				'accessibility': { focusBack: true, combination: 'Y', de: 'E' }
+			},
+			{
+				'text': _('Formula'),
+				'id': formulaTabName + '-tab-label',
+				'name': formulaTabName,
+				'context': 'Math',
+				'accessibility': { focusBack: true, combination: 'V', de: 'Y' }
 			}
 		];
 	},
 
-	getFullJSON: function(selectedId) {
-		var t = this.getNotebookbar(
-			[
-				this.getFileTab(),
-				this.getHomeTab(),
-				this.getInsertTab(),
-				this.getLayoutTab(),
-				this.getReferencesTab(),
-				this.getReviewTab(),
-				this.getFormatTab(),
-				this.getFormTab(),
-				this.getTableTab(),
-				this.getDrawTab(),
-				this.getViewTab(),
-				this.getHelpTab()
-			 ], selectedId);
+	getTabsJSON: function () {
+		return [
+			this.getFileTab(),
+			this.getHomeTab(),
+			this.getInsertTab(),
+			this.getLayoutTab(),
+			this.getReferencesTab(),
+			this.getReviewTab(),
+			this.getFormatTab(),
+			this.getFormTab(),
+			this.getTableTab(),
+			this.getDrawTab(),
+			this.getViewTab(),
+			this.getHelpTab(),
+			this.getFormulaTab()
+		]
+	},
 
-		return t;
+	getFullJSON: function (selectedId) {
+		return this.getNotebookbar(this.getTabsJSON(), selectedId);
 	},
 
 	getFileTab: function() {
 		var hasRevisionHistory = L.Params.revHistoryEnabled;
-		var hasPrint = !this._map['wopi'].HidePrintOption;
-		var hasRepair = !this._map['wopi'].HideRepairOption;
-		var hasSaveAs = !this._map['wopi'].UserCanNotWriteRelative;
-		var hasShare = this._map['wopi'].EnableShare;
-		var hideDownload = this._map['wopi'].HideExportOption;
+		var hasPrint = !this.map['wopi'].HidePrintOption;
+		var hasRepair = !this.map['wopi'].HideRepairOption;
+		var hasSaveAs = !this.map['wopi'].UserCanNotWriteRelative;
+		var hasShare = this.map['wopi'].EnableShare;
+		var hideDownload = this.map['wopi'].HideExportOption;
 		var hasGroupedSaveAs = window.prefs.get('saveAsMode') === 'group';
 		var hasRunMacro = window.enableMacrosExecution;
-		var hasSave = !this._map['wopi'].HideSaveOption;
+		var hasSave = !this.map['wopi'].HideSaveOption;
 		var content = [];
-
-
-		content = [];
 
 		if (hasSave) {
 			content.push({
@@ -327,18 +334,20 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 			});
 		}
 
-		content.push({
-			'type': 'container',
-			'children': [
-				{
-					'id': 'renamedocument',
-					'class': 'unoRenameDocument',
-					'type': 'bigcustomtoolitem',
-					'text': _('Rename'),
-					'accessibility': { focusBack: true,	combination: 'RN' }
-				}
-			]
-		});
+		if (this._map['wopi']._supportsRename() && this._map['wopi'].UserCanRename) {
+			content.push({
+				'type': 'container',
+				'children': [
+					{
+						'id': 'renamedocument',
+						'class': 'unoRenameDocument',
+						'type': 'bigcustomtoolitem',
+						'text': _('Rename'),
+						'accessibility': { focusBack: true,	combination: 'RN' }
+					}
+				]
+			});
+		}
 
 		if (window.wasmEnabled) {
 			content.push({
@@ -360,11 +369,11 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 
 	getHelpTab: function() {
 		var hasLatestUpdates = window.enableWelcomeMessage;
-		var hasFeedback = this._map.feedback;
+		var hasFeedback = this.map.feedback;
 		var hasAccessibilitySupport = window.enableAccessibility;
-		var hasAccessibilityCheck = this._map.getDocType() === 'text';
+		var hasAccessibilityCheck = this.map.getDocType() === 'text';
 		var hasAbout = L.DomUtil.get('about-dialog') !== null;
-		var hasServerAudit = !!this._map.serverAuditDialog;
+		var hasServerAudit = !!this.map.serverAuditDialog;
 
 		var content = [
 			{
@@ -509,6 +518,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				],
 				'vertical': 'true'
 			},
+			{ type: 'separator', id: 'home-undoredo-break', orientation: 'vertical' },
 			{
 				'id': 'home-paste:PasteMenu',
 				'type': 'menubutton',
@@ -560,6 +570,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				],
 				'vertical': 'true'
 			},
+			{ type: 'separator', id: 'home-resertattributes-break', orientation: 'vertical' },
 			{
 				'type': 'container',
 				'children': [
@@ -693,6 +704,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				],
 				'vertical': 'true'
 			},
+			{ type: 'separator', id: 'home-fontcombobox-break', orientation: 'vertical' },
 			{
 				'id': 'home-insert-annotation',
 				'type': 'bigtoolitem',
@@ -700,6 +712,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'command': '.uno:InsertAnnotation',
 				'accessibility': { focusBack: false, combination: 'ZC', de: 'ZC' }
 			},
+			{ type: 'separator', id: 'home-insertannotation-break', orientation: 'vertical' },
 			{
 				'type': 'container',
 				'children': [
@@ -829,6 +842,36 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'vertical': 'false'
 			},
 			{
+				'id': 'stylesview-btn',
+				'type': 'container',
+				'children': [
+					{
+						'id': 'scroll-up',
+						'type': 'customtoolitem',
+						'text': _('Scroll up'),
+						'command': 'scrollpreviewup',
+						'icon': 'lc_searchprev.svg',
+					},
+					{
+						'id': 'scroll-down',
+						'type': 'customtoolitem',
+						'text': _('Scroll down'),
+						'command': 'scrollpreviewdown',
+						'icon': 'lc_searchnext.svg',
+					},
+					{
+						'id': 'format-style-list-dialog',
+						'type': 'toolitem',
+						'text': _('Style list'),
+						'command': '.uno:SidebarDeck.StyleListDeck',
+						'icon': 'lc_morebutton.svg',
+						'accessibility': { focusBack: true, combination: 'SD', de: null }
+					},
+				],
+				'vertical': 'true'
+			},
+			{ type: 'separator', id: 'home-stylesview-break', orientation: 'vertical' },
+			{
 				'type': 'container',
 				'children': [
 					{
@@ -875,6 +918,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				],
 				'vertical': 'true'
 			},
+			{ type: 'separator', id: 'home-charmapcontrol-break', orientation: 'vertical' },
 			{
 				'type': 'container',
 				'children': [
@@ -896,7 +940,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 								{
 									'id': 'home-search-dialog',
 									'type': 'toolitem',
-									'text': _UNO('.uno:SearchDialog'),
+									'text': _('Replace'),
 									'command': '.uno:SearchDialog',
 									'accessibility': { focusBack: false, 	combination: 'FD',	de: 'US' }
 								}
@@ -933,13 +977,13 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'command': '.uno:ParagraphDialog',
 				'accessibility': { focusBack: false, combination: 'B', de: null }
 			},
-			app.isExperimentalMode() ? {
+			{
 				'id': 'format-style-dialog',
 				'type': 'bigtoolitem',
 				'text': _('Style list'),
 				'command': '.uno:SidebarDeck.StyleListDeck',
 				'accessibility': { focusBack: false, combination: 'SD', de: null }
-			} : {},
+			},
 			{
 				'id': 'format-FormatBulletsMenu',
 				'type': 'menubutton',
@@ -1043,7 +1087,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 	},
 
 	getInsertTab: function() {
-		var isODF = L.LOUtil.isFileODF(this._map);
+		var isODF = app.LOUtil.isFileODF(this.map);
 		var content = [
 			{
 				'id': 'insert-insert-page-break',
@@ -1055,7 +1099,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 			{
 				'id': 'insert-insert-table:InsertTableMenu',
 				'type': 'menubutton',
-				'text': _UNO('.uno:InsertTable', 'text'),
+				'text': _('Table'),
 				'command': '.uno:InsertTable',
 				'accessibility': { focusBack: false,	combination: 'IT',	de: null }
 			},
@@ -1097,7 +1141,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				],
 				'vertical': 'true'
 			},
-			(this._map['wopi'].EnableRemoteLinkPicker) ? {
+			(this.map['wopi'].EnableRemoteLinkPicker) ? {
 				'type': 'container',
 				'children': [
 					{
@@ -1136,6 +1180,14 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'command': 'hyperlinkdialog',
 				'accessibility': { focusBack: false,	combination: 'ZL',	de:	'8' }
 			},
+			(this.map['wopi'].EnableRemoteAIContent) ? {
+				'id': 'insert-insert-remote-ai-content',
+				'class': 'unoremoteaicontent',
+				'type': 'bigcustomtoolitem',
+				'text': _('Assistant'),
+				'command': 'remoteaicontent',
+				'accessibility': { focusBack: true, combination: 'RL', de: null }
+			} : {},
 			{
 				'id': 'insert-insert-annotation',
 				'type': 'bigtoolitem',
@@ -1338,7 +1390,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 							{
 								'id': 'insert-insert-objects-star-math',
 								'type': 'toolitem',
-								'text': _UNO('.uno:InsertObjectStarMath', 'text'),
+								'text': _('Formula'),
 								'command': '.uno:InsertObjectStarMath',
 								'accessibility': { focusBack: true,	combination: 'ET',	de:	null }
 							}
@@ -1953,14 +2005,14 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'vertical': 'true'
 			}
 		];
-		if (this._map.zotero) {
+		if (this.map.zotero) {
 			content.push(
 				{
 					'id': 'zoteroaddeditbibliography',
 					'class': 'unozoteroaddeditbibliography',
 					'type': 'bigcustomtoolitem',
 					'text': _('Add Bibliography'),
-					'command': 'zoteroeditbibliography'
+					'command': 'zoteroaddeditbibliography'
 				},
 				{
 					'type': 'container',
@@ -2220,8 +2272,8 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				'vertical': 'true'
 			},
 			{
-				'id': 'review-track-changes',
-				'type': 'bigtoolitem',
+				'id': 'review-track-changes:RecordTrackedChangesMenu',
+				'type': 'menubutton',
 				'text': _UNO('.uno:TrackChanges', 'text'),
 				'command': '.uno:TrackChanges',
 				'accessibility': { focusBack: true, combination: 'TC', de: null }
@@ -2631,8 +2683,39 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 		return this.getTabPage(tableTabName, content);
 	},
 
+	getFormulaTab: function() {
+		var content = [
+			{
+				'type': 'bigtoolitem',
+				'text': _UNO('.uno:ChangeFont', 'text'),
+				'command': '.uno:ChangeFont',
+				'icon': 'lc_fontdialog.svg'
+			},
+			{ type: 'separator', id: 'formula-changefont-break', orientation: 'vertical' },
+			{
+				'type': 'bigtoolitem',
+				'text': _UNO('.uno:ChangeFontSize', 'text'),
+				'command': '.uno:ChangeFontSize',
+				'icon': 'lc_fontheight.svg'
+			},
+			{
+				'type': 'bigtoolitem',
+				'text': _UNO('.uno:ChangeDistance', 'text'),
+				'command': '.uno:ChangeDistance',
+				'icon': 'lc_spacing.svg',
+			},
+			{
+				'type': 'bigtoolitem',
+				'text': _UNO('.uno:ChangeAlignment', 'text'),
+				'command': '.uno:ChangeAlignment',
+				'icon': 'lc_fontworkalignmentfloater.svg'
+			}
+        ];
+		return this.getTabPage(formulaTabName, content);
+	},
+
 	getDrawTab: function() {
-		var isODF = L.LOUtil.isFileODF(this._map);
+		var isODF = app.LOUtil.isFileODF(this.map);
 		var content = [
 			{
 				'type': 'bigtoolitem',
@@ -2915,6 +2998,12 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				],
 				'vertical': 'true'
 			},
+			{
+				'type': 'bigtoolitem',
+				'text': _UNO('.uno:Crop'),
+				'command': '.uno:Crop',
+				'context': 'Graphic'
+			},
 		];
 
 		return this.getTabPage(drawTabName, content);
@@ -2959,7 +3048,7 @@ L.Control.NotebookbarWriter = L.Control.Notebookbar.extend({
 				return null;
 			}
 
-			var uiManager = that._map.uiManager;
+			var uiManager = that.map.uiManager;
 			if (!uiManager.isButtonVisible(c.id)) {
 				return null;
 			}

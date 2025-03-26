@@ -28,6 +28,7 @@ class UnitKit;
 class UnitTimeout;
 
 class ChildProcess;
+class ForKitProcess;
 class WebSocketHandler;
 class ClientSession;
 class Message;
@@ -126,13 +127,13 @@ protected:
 
     /// Construct a UnitBase instance with a default name.
     explicit UnitBase(const std::string& name, UnitType type)
-        : _setRetValue(false)
-        , _result(TestResult::Ok)
+        : testname(name)
+        , _socketPoll(nullptr)
         , _timeoutMilliSeconds(std::chrono::seconds(30))
         , _startTimeMilliSeconds(std::chrono::milliseconds::zero())
         , _type(type)
-        , _socketPoll(nullptr)
-        , testname(name)
+        , _result(TestResult::Ok)
+        , _setRetValue(false)
     {
     }
 
@@ -358,24 +359,23 @@ private:
     static TestOptions GlobalTestOptions; ///< The test options for this Test Suite.
     static TestResult GlobalResult; ///< The result of all tests. Latches at first failure.
 
-    /// Did we set the result of the test yet ?
-    bool _setRetValue;
-    TestResult _result;
+    std::mutex _lock; ///< Used to protect cleanup functions.
+    std::mutex _lockSocketPoll; ///< Used to sync _socketPoll
+
     std::string _reason;
+protected:
+    /// The name of the current test. Accessed from logs in derived classes.
+    std::string testname;
+private:
+    std::shared_ptr<SocketPoll> _socketPoll; ///< Poll thread for async http comm.
 
     std::chrono::milliseconds _timeoutMilliSeconds;
     /// The time at which this particular test started, relative to the start of the Test Suite.
     std::chrono::milliseconds _startTimeMilliSeconds;
     UnitType _type;
-
-    std::mutex _lock; ///< Used to protect cleanup functions.
-    std::mutex _lockSocketPoll; ///< Used to sync _socketPoll
-    std::shared_ptr<SocketPoll> _socketPoll; ///< Poll thread for async http comm.
-
-protected:
-
-    /// The name of the current test. Accessed from logs in derived classes.
-    std::string testname;
+    TestResult _result;
+    /// Did we set the result of the test yet ?
+    bool _setRetValue;
 };
 
 struct TileData;
@@ -390,8 +390,8 @@ public:
 /// Derive your WSD unit test / hooks from me.
 class UnitWSD : public UnitBase
 {
-    bool _hasKitHooks;
     UnitWSDInterface *_wsd;
+    bool _hasKitHooks;
 
 public:
     UnitWSD(const std::string& testname);
@@ -468,6 +468,12 @@ public:
 
     /// When a new child kit process reports
     virtual void newChild(const std::shared_ptr<ChildProcess>& /*child*/) {}
+
+    /// When a new subforkit process reports
+    virtual void newSubForKit(const std::shared_ptr<ForKitProcess>& /*subforkit*/, const std::string& /*configId*/) {}
+
+    /// When a subforkit process is killed
+    virtual void killSubForKit(const std::string& /*configId*/) {}
 
     /// When we get a segfault message from forkit; override to test crashes ...
     virtual void kitSegfault(int /* count */)
@@ -650,6 +656,12 @@ public:
     {
         return false;
     }
+
+    /// Before the kit process poll callback executes
+    virtual void preKitPollCallback() {}
+
+    /// After the kit process created a ChildSession
+    virtual void postKitSessionCreated(Session* /*session*/) {}
 
     /// Allow a custom LibreOfficeKit wrapper
     virtual LibreOfficeKit *lok_init(const char * /* instdir */,

@@ -63,11 +63,11 @@ class Sidebar {
 	}
 
 	isVisible(): boolean {
-		return $('#sidebar-dock-wrapper').is(':visible');
+		return $('#sidebar-dock-wrapper').hasClass('visible');
 	}
 
 	closeSidebar() {
-		$('#sidebar-dock-wrapper').hide();
+		$('#sidebar-dock-wrapper').removeClass('visible');
 		this.map._onResize();
 
 		if (!this.map.editorHasFocus()) {
@@ -141,14 +141,22 @@ class Sidebar {
 				.height + 'px';
 	}
 
-	unsetSelectedSidebar() {
-		this.map.uiManager.setDocTypePref('PropertyDeck', false);
-		this.map.uiManager.setDocTypePref('SdSlideTransitionDeck', false);
-		this.map.uiManager.setDocTypePref('SdCustomAnimationDeck', false);
-		this.map.uiManager.setDocTypePref('SdMasterPagesDeck', false);
-		this.map.uiManager.setDocTypePref('NavigatorDeck', false);
-		this.map.uiManager.setDocTypePref('StyleListDeck', false);
-		this.map.uiManager.setDocTypePref('A11yCheckDeck', false);
+	updateSidebarPrefs(currentDeck: string) {
+		const decks = [
+			'PropertyDeck',
+			'SdSlideTransitionDeck',
+			'SdCustomAnimationDeck',
+			'SdMasterPagesDeck',
+			'NavigatorDeck',
+			'StyleListDeck',
+			'A11yCheckDeck',
+		];
+
+		const deckPref: { [key: string]: string } = {};
+		decks.forEach((deck: string) => {
+			deckPref[deck] = currentDeck === deck ? 'true' : 'false';
+		});
+		this.map.uiManager.setDocTypeMultiplePrefs(deckPref);
 	}
 
 	commandForDeck(deckId: string): string {
@@ -216,15 +224,14 @@ class Sidebar {
 					sidebarData.children[0] &&
 					sidebarData.children[0].id
 				) {
-					this.unsetSelectedSidebar();
 					var currentDeck = sidebarData.children[0].id;
-					this.map.uiManager.setDocTypePref(currentDeck, true);
+					this.updateSidebarPrefs(currentDeck);
 					if (this.targetDeckCommand) {
 						var stateHandler = this.map['stateChangeHandler'];
 						var isCurrent = stateHandler
 							? stateHandler.getItemValue(this.targetDeckCommand)
 							: false;
-						// just to be sure chack with other method
+						// just to be sure check with other method
 						if (isCurrent === 'false' || !isCurrent)
 							isCurrent =
 								this.targetDeckCommand === this.commandForDeck(currentDeck);
@@ -236,8 +243,7 @@ class Sidebar {
 				}
 
 				this.builder.build(this.container, [sidebarData]);
-				if (!this.isVisible())
-					$('#sidebar-dock-wrapper').show(this.options.animSpeed);
+				if (!this.isVisible()) $('#sidebar-dock-wrapper').addClass('visible');
 
 				this.map.uiManager.setDocTypePref('ShowSidebar', true);
 			} else {
@@ -250,7 +256,7 @@ class Sidebar {
 		if (!data) return false;
 
 		if (data.type === 'treelistbox') {
-			(data as TreeWidget).draggable = false;
+			(data as TreeWidgetJSON).draggable = false;
 			return true;
 		}
 

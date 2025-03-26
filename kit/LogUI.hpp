@@ -19,15 +19,15 @@
 class LogUiCmd
 {
 public:
-    void createTmpFile(std::string docId);
+    void createTmpFile(const std::string& docId);
     void logUiCmdLine(int userId, const std::string& line);
     void saveLogFile();
     std::chrono::steady_clock::time_point getKitStartTimeSec();
 
 private:
     std::fstream _fileStreamUICommands;
-    std::chrono::steady_clock::time_point _kitStartTimeSec;
-    std::string _kitStartTimeStr;
     std::set<int> _usersLogged;
+    std::string _kitStartTimeStr;
     std::string _docId;
+    std::chrono::steady_clock::time_point _kitStartTimeSec;
 };

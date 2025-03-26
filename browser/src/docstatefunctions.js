@@ -26,7 +26,6 @@ window.addEventListener('load', function () {
 	);
 	app.calc.cellAddress = new app.definitions.simplePoint(0, 0);
 	app.calc.splitCoordinate = new app.definitions.simplePoint(0, 0);
-	app.canvasSize = new app.definitions.simplePoint(0, 0);
 	app.file.viewedRectangle = new app.definitions.simpleRectangle(0, 0, 0, 0);
 	app.file.textCursor.rectangle = new app.definitions.simpleRectangle(
 		0,
@@ -34,6 +33,12 @@ window.addEventListener('load', function () {
 		0,
 		0,
 	);
+	app.view.size = new app.definitions.simplePoint(0, 0);
+	app.file.size = new app.definitions.simplePoint(0, 0);
+	app.tile.size = new app.definitions.simplePoint(0, 0);
+	app.pixelsToTwips = 15;
+	app.twipsToPixels = 1 / app.pixelsToTwips;
+	app.tile.size.pX = app.tile.size.pY = 256;
 });
 
 app.getViewRectangles = function () {
@@ -43,7 +48,7 @@ app.getViewRectangles = function () {
 };
 
 // ToDo: _splitPanesContext should be an app variable.
-app.isPointVisibleInTheDisplayedArea = function (twipsArray) {
+app.isPointVisibleInTheDisplayedArea = function (twipsArray /* x, y */) {
 	if (app.map._docLayer._splitPanesContext) {
 		let rectangles = app.map._docLayer._splitPanesContext.getViewRectangles();
 		for (let i = 0; i < rectangles.length; i++) {
@@ -55,12 +60,26 @@ app.isPointVisibleInTheDisplayedArea = function (twipsArray) {
 	}
 };
 
+app.isRectangleVisibleInTheDisplayedArea = function (
+	twipsArray /* x, y, width, height */,
+) {
+	if (app.map._docLayer._splitPanesContext) {
+		let rectangles = app.map._docLayer._splitPanesContext.getViewRectangles();
+		for (let i = 0; i < rectangles.length; i++) {
+			if (rectangles[i].intersectsRectangle(twipsArray)) return true;
+		}
+		return false;
+	} else {
+		return app.file.viewedRectangle.intersectsRectangle(twipsArray);
+	}
+};
+
 app.isReadOnly = function () {
 	return app.file.readOnly;
 };
 
 app.getScale = function () {
-	return (app.tile.size.pixels[0] / app.tile.size.twips[0]) * 15;
+	return ((app.tile.size.pX / app.tile.size.x) * 15) / app.dpiScale;
 };
 
 app.isCommentEditingAllowed = function () {
@@ -141,18 +160,23 @@ app.updateFollowingUsers = function () {
 	console.debug('user following: update');
 	var isCellCursorVisible = app.calc.cellCursorVisible;
 	var isTextCursorVisible = app.file.textCursor.visible;
+
 	if (isCellCursorVisible || isTextCursorVisible) {
+		let twipsArray = [];
 		if (isCellCursorVisible)
-			var cursorPos = app.map._docLayer._twipsToLatLng({
-				x: app.calc.cellCursorRectangle.x2,
-				y: app.calc.cellCursorRectangle.y2,
-			});
+			twipsArray = [
+				app.calc.cellCursorRectangle.x2,
+				app.calc.cellCursorRectangle.y2,
+			];
 		else
-			cursorPos = app.map._docLayer._twipsToLatLng({
-				x: app.file.textCursor.rectangle.x2,
-				y: app.file.textCursor.rectangle.y2,
-			});
-		var cursorPositionInView = app.map._docLayer._isLatLngInView(cursorPos);
+			twipsArray = [
+				app.file.textCursor.rectangle.x2,
+				app.file.textCursor.rectangle.y2,
+			];
+
+		const cursorPositionInView =
+			app.isPointVisibleInTheDisplayedArea(twipsArray);
+
 		if (
 			parseInt(app.getFollowedViewId()) ===
 				parseInt(app.map._docLayer._viewId) &&
@@ -168,15 +192,15 @@ app.updateFollowingUsers = function () {
 	}
 };
 
-app.showAsyncDownloadError = function (response, initalMsg) {
+app.showAsyncDownloadError = function (response, initialMsg) {
 	const reader = new FileReader();
 	const timeout = 10000;
 	reader.onload = function () {
 		if (reader.result === 'wrong server') {
-			initalMsg += _(', cluster configuration error: mis-matching serverid');
-			app.map.uiManager.showSnackbar(initalMsg, '', null, timeout);
+			initialMsg += _(', cluster configuration error: mis-matching serverid');
+			app.map.uiManager.showSnackbar(initialMsg, '', null, timeout);
 		} else {
-			app.map.uiManager.showSnackbar(initalMsg, '', null, timeout);
+			app.map.uiManager.showSnackbar(initialMsg, '', null, timeout);
 		}
 	};
 	reader.readAsText(response);

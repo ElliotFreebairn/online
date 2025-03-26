@@ -29,7 +29,7 @@ class SearchEditWidget extends EditWidget {
 	constructor(
 		parentContainer: HTMLElement,
 		data: EditWidgetJSON,
-		builder: any,
+		builder: JSBuilder,
 		callback: JSDialogCallback,
 	) {
 		super(parentContainer, data, builder, callback);
@@ -39,7 +39,7 @@ class SearchEditWidget extends EditWidget {
 		this.updateSearchButtons();
 		if (L.Map.THIS.getDocType() === 'text') {
 			// perform the immediate search in Writer
-			L.Map.THIS.search(
+			app.searchService.search(
 				this.edit.input.value,
 				false,
 				'',
@@ -57,9 +57,9 @@ class SearchEditWidget extends EditWidget {
 			e.keyCode === 13
 		) {
 			if (e.shiftKey) {
-				L.Map.THIS.search(entry.value, true);
+				app.searchService.search(entry.value, true);
 			} else {
-				L.Map.THIS.search(entry.value);
+				app.searchService.search(entry.value);
 			}
 			e.preventDefault();
 		} else if (e.ctrlKey && e.keyCode === 70) {
@@ -117,7 +117,7 @@ class SearchEditWidget extends EditWidget {
 JSDialog.searchEdit = function (
 	parentContainer: HTMLElement,
 	data: EditWidgetJSON,
-	builder: any,
+	builder: JSBuilder,
 	callback: JSDialogCallback,
 ) {
 	const widget = new SearchEditWidget(parentContainer, data, builder, callback);

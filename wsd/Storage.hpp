@@ -17,13 +17,16 @@
 #include <common/Common.hpp>
 #include <common/ConfigUtil.hpp>
 #include <common/Log.hpp>
+#include <common/Util.hpp>
 #include <wsd/COOLWSD.hpp>
 
 #include <Poco/URI.h>
 
+#include <chrono>
+#include <ios>
 #include <memory>
 #include <string>
-#include <chrono>
+#include <string_view>
 
 class LockContext;
 
@@ -88,6 +91,14 @@ public:
 
         /// Set last modified time as unsafe
         void setLastModifiedTimeUnSafe() { _modifiedTime.clear(); }
+
+        virtual void dumpState(std::ostream& os, const std::string& indent = "\n  ") const
+        {
+            os << indent << "filename: [" << _filename << ']';
+            os << indent << "size: " << _size;
+            os << indent << "ownerId: [" << _ownerId << ']';
+            os << indent << "modifiedTime: [" << _modifiedTime << ']';
+        }
 
     private:
         std::size_t _size;
@@ -162,6 +173,7 @@ public:
         /// Dump the internals of this instance.
         void dumpState(std::ostream& os, const std::string& indent = "\n  ") const
         {
+            os << indent << "StorageBase::Attributes:";
             os << indent << "forced: " << std::boolalpha << isForced();
             os << indent << "user-modified: " << std::boolalpha << isUserModified();
             os << indent << "auto-save: " << std::boolalpha << isAutosave();
@@ -170,6 +182,8 @@ public:
         }
 
     private:
+        /// The client-provided saving extended data to send to the WOPI host.
+        std::string _extendedData;
         /// Whether or not we want to force uploading.
         bool _forced;
         /// The document has been modified by the user.
@@ -178,8 +192,6 @@ public:
         bool _isAutosave;
         /// Saving on exit (when the document is cleaned up from memory)
         bool _isExitSave;
-        /// The client-provided saving extended data to send to the WOPI host.
-        std::string _extendedData;
     };
 
     /// Represents the upload request result, with a Result code
@@ -203,8 +215,8 @@ public:
         }
 
         UploadResult(Result result, std::string reason)
-            : _result(result)
-            , _reason(std::move(reason))
+            : _reason(std::move(reason))
+            , _result(result)
         {
         }
 
@@ -227,10 +239,10 @@ public:
         const std::string& getReason() const { return _reason; }
 
     private:
-        Result _result;
         std::string _saveAsName;
         std::string _saveAsUrl;
         std::string _reason;
+        Result _result;
     };
 
     /// The state of an asynchronous request.
@@ -246,8 +258,8 @@ public:
         );
 
         AsyncRequest(State state, TResult result)
-            : _state(state)
-            , _result(std::move(result))
+            : _result(std::move(result))
+            , _state(state)
         {
         }
 
@@ -258,8 +270,8 @@ public:
         const TResult& result() const { return _result; }
 
     private:
-        State _state;
         TResult _result;
+        State _state;
     };
 
     /// The state of an asynchronous Upload request.
@@ -291,8 +303,8 @@ public:
 
         /// Construct a LockUpdateResult with a failure reason.
         LockUpdateResult(Status status, LockState requestedLockState, std::string reason)
-            : _status(status)
-            , _reason(std::move(reason))
+            : _reason(std::move(reason))
+            , _status(status)
             , _requestedLockState(requestedLockState)
         {
         }
@@ -308,8 +320,8 @@ public:
         LockState requestedLockState() const { return _requestedLockState; }
 
     private:
-        Status _status;
         std::string _reason;
+        Status _status;
         LockState _requestedLockState;
     };
 
@@ -322,13 +334,13 @@ public:
     };
 
     /// localStorePath the absolute root path of the chroot.
-    /// jailPath the path within the jail that the child uses.
+    /// jailPath the path within the jail that the child uses for documents.
     StorageBase(const Poco::URI& uri, const std::string& localStorePath,
                 const std::string& jailPath)
-        : _localStorePath(localStorePath)
+        : _fileInfo(/*size=*/0, /*filename=*/std::string(), /*ownerId=*/"cool",
+                    /*modifiedTime=*/std::string())
+        , _localStorePath(localStorePath)
         , _jailPath(jailPath)
-        , _fileInfo(/*size=*/0, /*filename=*/std::string(), /*ownerId=*/"cool",
-                    /*modifiledTime=*/std::string())
         , _isDownloaded(false)
     {
         setUri(uri);
@@ -340,6 +352,9 @@ public:
     const Poco::URI& getUri() const { return _uri; }
 
     const std::string& getJailPath() const { return _jailPath; }
+
+    /// Returns the root path of the jail directory of user presets.
+    std::string getJailPresetsPath() const;
 
     /// Returns the root path to the jailed file.
     const std::string& getRootFilePath() const { return _jailedFilePath; }
@@ -394,7 +409,7 @@ public:
     /// Update the locking state (check-in/out) of the associated file asynchronously.
     virtual void updateLockStateAsync(const Authorization& auth, LockContext& lockCtx,
                                       LockState lock, const Attributes& attribs,
-                                      SocketPoll& socketPoll,
+                                      const std::shared_ptr<SocketPoll>& socketPoll,
                                       const AsyncLockStateCallback& asyncLockStateCallback) = 0;
 
     /// Returns a local file path for the given URI.
@@ -412,7 +427,8 @@ public:
     virtual std::size_t
     uploadLocalFileToStorageAsync(const Authorization& auth, LockContext& lockCtx,
                                   const std::string& saveAsPath, const std::string& saveAsFilename,
-                                  const bool isRename, const Attributes&, SocketPoll&,
+                                  bool isRename, const Attributes&,
+                                  const std::shared_ptr<SocketPoll>&,
                                   const AsyncUploadCallback& asyncUploadCallback) = 0;
 
     /// Get the progress state of an asynchronous LocalFileToStorage upload.
@@ -449,12 +465,32 @@ public:
     static std::unique_ptr<StorageBase> create(const Poco::URI& uri, const std::string& jailRoot,
                                                const std::string& jailPath, bool takeOwnership);
 
+    virtual void dumpState(std::ostream& os, const std::string& indent = "\n  ") const
+    {
+        const auto now = std::chrono::steady_clock::now();
+
+        os << indent << "StorageBase:";
+        os << indent << "uri: " << _uri.toString();
+        os << indent << "isDownloaded: " << std::boolalpha << _isDownloaded;
+        os << indent << "localStorePath: " << _localStorePath;
+        os << indent << "jailPath: " << _jailPath;
+        os << indent << "jailedFilePath: " << _jailedFilePath;
+        os << indent << "jailedFilePathAnonym: " << _jailedFilePathAnonym;
+
+        const auto st = FileUtil::Stat(getRootFilePathUploading());
+        os << indent << "rootFilePathUploading: [" << getRootFilePathUploading() << "], "
+           << (st.exists() ? Util::getTimeForLog(now, st.modifiedTimepoint()) : "<missing>");
+
+        os << indent << "fileInfo: ";
+        _fileInfo.dumpState(os, indent + "  ");
+    }
+
 protected:
 
     /// Sanitize a URI by removing authorization tokens.
     void sanitizeUri(Poco::URI& uri)
     {
-        static const std::string access_token("access_token");
+        constexpr std::string_view access_token("access_token");
 
         Poco::URI::QueryParameters queryParams = uri.getQueryParameters();
         for (auto& param : queryParams)
@@ -482,11 +518,11 @@ protected:
 
 private:
     Poco::URI _uri;
+    FileInfo _fileInfo;
     const std::string _localStorePath;
     const std::string _jailPath;
     std::string _jailedFilePath;
     std::string _jailedFilePathAnonym;
-    FileInfo _fileInfo;
     bool _isDownloaded;
 
     static bool FilesystemEnabled;
@@ -540,7 +576,7 @@ public:
     }
 
     void updateLockStateAsync(const Authorization&, LockContext&, LockState requestedLockState,
-                              const Attributes&, SocketPoll&,
+                              const Attributes&, const std::shared_ptr<SocketPoll>&,
                               const AsyncLockStateCallback& asyncLockStateCallback) override
     {
         if (asyncLockStateCallback)
@@ -557,7 +593,8 @@ public:
     std::size_t
     uploadLocalFileToStorageAsync(const Authorization& auth, LockContext& lockCtx,
                                   const std::string& saveAsPath, const std::string& saveAsFilename,
-                                  const bool isRename, const Attributes&, SocketPoll&,
+                                  bool isRename, const Attributes&,
+                                  const std::shared_ptr<SocketPoll>&,
                                   const AsyncUploadCallback& asyncUploadCallback) override;
 
 private:
@@ -575,20 +612,21 @@ private:
 /// and with what token.
 class LockContext final
 {
-    /// Do we have support for locking for a storage.
-    bool _supportsLocks;
-    /// Do we own the (leased) lock currently
-    StorageBase::LockState _lockState;
     /// Name if we need it to use consistently for locking
     std::string _lockToken;
     /// Time of last successful lock (re-)acquisition
     std::chrono::steady_clock::time_point _lastLockTime;
+    const std::chrono::seconds _refreshSeconds;
+    /// Do we have support for locking for a storage.
+    bool _supportsLocks;
+    /// Do we own the (leased) lock currently
+    StorageBase::LockState _lockState;
 
 public:
     LockContext()
-        : _supportsLocks(false)
+        : _refreshSeconds(ConfigUtil::getConfigValue<int>("storage.wopi.locking.refresh", 900))
+        , _supportsLocks(false)
         , _lockState(StorageBase::LockState::UNLOCK)
-        , _refreshSeconds(ConfigUtil::getConfigValue<int>("storage.wopi.locking.refresh", 900))
     {
     }
 
@@ -619,9 +657,6 @@ public:
     bool needsRefresh(const std::chrono::steady_clock::time_point& now) const;
 
     void dumpState(std::ostream& os) const;
-
-private:
-    const std::chrono::seconds _refreshSeconds;
 };
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

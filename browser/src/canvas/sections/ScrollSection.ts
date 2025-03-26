@@ -191,7 +191,7 @@ export class ScrollSection extends CanvasSectionObject {
 				&& (<any>window).mode.isDesktop()
 				&& this.containerObject.isDraggingSomething()
 				&& L.Map.THIS._docLayer._docType === 'spreadsheet') {
-					var temp = this.containerObject.positionOnMouseDown;
+					var temp = [e.pos.x, e.pos.y];
 					var tempPos = [(this.isRTL() ? this.map._size.x - temp[0] : temp[0]) * app.dpiScale, temp[1] * app.dpiScale];
 					var docTopLeft = app.sectionContainer.getDocumentTopLeft();
 					tempPos = [tempPos[0] + docTopLeft[0], tempPos[1] + docTopLeft[1]];
@@ -221,7 +221,7 @@ export class ScrollSection extends CanvasSectionObject {
 			vx = -50;
 		}
 
-		this.onScrollVelocity({vx: vx, vy: vy});
+		this.onScrollVelocity({ vx: vx, vy: vy, pos: e.pos });
 	}
 
 	private getVerticalScrollLength (): number {
@@ -245,12 +245,12 @@ export class ScrollSection extends CanvasSectionObject {
 	}
 
 	private calculateVerticalScrollSize (scrollLength: number) :number {
-		var scrollSize = Math.round(scrollLength * scrollLength / app.view.size.pixels[1]);
+		var scrollSize = Math.round(scrollLength * scrollLength / app.view.size.pY);
 		return Math.round(scrollSize);
 	}
 
 	private calculateYMinMax () {
-		var diff: number = Math.round(app.view.size.pixels[1] - this.containerObject.getDocumentAnchorSection().size[1]);
+		var diff: number = Math.round(app.view.size.pY - this.containerObject.getDocumentAnchorSection().size[1]);
 
 		if (diff >= 0) {
 			this.sectionProperties.yMin = 0;
@@ -259,10 +259,10 @@ export class ScrollSection extends CanvasSectionObject {
 				this.sectionProperties.drawVerticalScrollBar = true;
 		}
 		else {
-			diff = Math.round((app.view.size.pixels[1] - this.containerObject.getDocumentAnchorSection().size[1]) * 0.5);
-			this.sectionProperties.yMin = diff;
+			diff = Math.round((app.view.size.pY - this.containerObject.getDocumentAnchorSection().size[1]) * 0.5);
+			this.sectionProperties.yMin = app.map.getDocType() === 'spreadsheet' ? 0 : diff;
 			this.sectionProperties.yMax = diff;
-			if (app.view.size.pixels[1] >  0) {
+			if (app.view.size.pY > 0) {
 				if (this.map._docLayer._docType !== 'spreadsheet' || !(<any>window).mode.isDesktop())
 					this.sectionProperties.drawVerticalScrollBar = false;
 			}
@@ -282,7 +282,7 @@ export class ScrollSection extends CanvasSectionObject {
 			result.scrollSize = this.sectionProperties.minimumScrollSize;
 		}
 
-		result.ratio = app.view.size.pixels[1] / result.scrollLength; // 1px scrolling = xpx document height.
+		result.ratio = app.view.size.pY / result.scrollLength; // 1px scrolling = xpx document height.
 		result.startY = Math.round(this.documentTopLeft[1] / result.ratio + this.sectionProperties.yOffset);
 
 		result.verticalScrollStep = this.size[1] / 2;
@@ -311,12 +311,12 @@ export class ScrollSection extends CanvasSectionObject {
 	}
 
 	private calculateHorizontalScrollSize (scrollLength: number): number {
-		var scrollSize = Math.round(scrollLength * scrollLength / app.view.size.pixels[0]);
+		var scrollSize = Math.round(scrollLength * scrollLength / app.view.size.pX);
 		return scrollSize;
 	}
 
 	private calculateXMinMax (): void {
-		var diff: number = Math.round(app.view.size.pixels[0] - this.containerObject.getDocumentAnchorSection().size[0]);
+		var diff: number = Math.round(app.view.size.pX - this.containerObject.getDocumentAnchorSection().size[0]);
 
 		if (diff >= 0) {
 			this.sectionProperties.xMin = 0;
@@ -325,10 +325,10 @@ export class ScrollSection extends CanvasSectionObject {
 				this.sectionProperties.drawHorizontalScrollBar = true;
 		}
 		else {
-			diff = Math.round((app.view.size.pixels[0] - this.containerObject.getDocumentAnchorSection().size[0]) * 0.5);
+			diff = Math.round((app.view.size.pX - this.containerObject.getDocumentAnchorSection().size[0]) * 0.5);
 			this.sectionProperties.xMin = diff;
 			this.sectionProperties.xMax = diff;
-			if (app.view.size.pixels[0] >  0) {
+			if (app.view.size.pX >  0) {
 				if (this.map._docLayer._docType !== 'spreadsheet' || !(<any>window).mode.isDesktop())
 					this.sectionProperties.drawHorizontalScrollBar = false;
 			}
@@ -348,7 +348,7 @@ export class ScrollSection extends CanvasSectionObject {
 			result.scrollSize = this.sectionProperties.minimumScrollSize;
 		}
 
-		result.ratio = app.view.size.pixels[0] / result.scrollLength;
+		result.ratio = app.view.size.pX / result.scrollLength;
 		result.startX = Math.round(this.documentTopLeft[0] / result.ratio + this.sectionProperties.xOffset);
 
 		result.horizontalScrollStep = this.size[0] / 2;
@@ -1147,6 +1147,8 @@ export class ScrollSection extends CanvasSectionObject {
 
 	public onMouseWheel (point: Array<number>, delta: Array<number>, e: MouseEvent): void {
 		if (e.ctrlKey) return;
+
+		this.map.fire('closepopups'); // close all popups when scrolling
 
 		let hscroll = 0, vscroll = 0;
 		if (Math.abs(delta[1]) > Math.abs(delta[0])) {

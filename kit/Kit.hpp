@@ -38,9 +38,10 @@
 
 void lokit_main(
 #if !MOBILEAPP
-    const std::string& childRoot, const std::string& jailId, const std::string& sysTemplate,
-    const std::string& loTemplate, bool noCapabilities, bool noSeccomp, bool useMountNamespaces,
-    bool queryVersionInfo, bool displayVersion, bool sysTemplateIncomplete,
+    const std::string& childRoot, const std::string& jailId, const std::string& configId,
+    const std::string& sysTemplate, const std::string& loTemplate, bool noCapabilities,
+    bool noSeccomp, bool useMountNamespaces, bool queryVersionInfo, bool displayVersion,
+    bool sysTemplateIncomplete,
 #else
     int docBrokerSocket, const std::string& userInterface,
 #endif
@@ -170,7 +171,7 @@ public:
 #endif
     int kitPoll(int timeoutMicroS);
     void setDocument(std::shared_ptr<Document> document) { _document = std::move(document); }
-    std::shared_ptr<Document> getDocument() const { return _document; }
+    const std::shared_ptr<Document>& getDocument() const { return _document; }
 
     // unusual LOK event from another thread, push into our loop to process.
     static bool pushToMainThread(LibreOfficeKitCallback callback, int type, const char* p,
@@ -269,7 +270,8 @@ private:
     static void reapZombieChildren();
 
     /// Calculate tile rendering priority from a TileDesc
-    virtual float getTilePriority(const std::chrono::steady_clock::time_point &now, const TileDesc &desc) const override;
+    virtual Priority getTilePriority(const TileDesc &desc) const override;
+    virtual std::vector<ViewIdInactivity> getViewIdsByInactivity() const override;
 
 public:
     /// Request loading a document, or a new view, if one exists,
@@ -295,6 +297,37 @@ public:
     DocumentPasswordType getDocPasswordType() const { return _docPasswordType; }
 
     void updateActivityHeader() const;
+
+    /// Really important that if we drop, we re-start for the kit.
+    class ThreadDropper final {
+        Document *_doc;
+    public:
+        ThreadDropper() : _doc(nullptr) { }
+        ~ThreadDropper()
+        {
+            if (_doc) _doc->startThreads();
+        }
+        void clear()
+        {
+            _doc = nullptr;
+        }
+        bool dropThreads(Document *doc)
+        {
+            if (doc->joinThreads())
+            {
+                // only this path starts later.
+                _doc = doc;
+                return true;
+            }
+            return false;
+        }
+        void startThreads()
+        {
+            if (_doc)
+                _doc->startThreads();
+            _doc = nullptr;
+        }
+    };
 
     bool joinThreads();
     void startThreads();
@@ -342,11 +375,11 @@ public:
     bool canRenderTiles() const {
         return processInputEnabled() && !isLoadOngoing() &&
             !isBackgroundSaveProcess() && _queue &&
-            _queue->getTileQueueSize() > 0;
+            !_queue->isTileQueueEmpty();
     }
     bool hasCallbacks() const { return _queue && _queue->callbackSize() > 0; }
 
-    /// Should we get through the SocketPoll fast to process queus ?
+    /// Should we get through the SocketPoll fast to process queues ?
     bool needsQuickPoll() const
     {
         if (hasCallbacks())
@@ -379,6 +412,8 @@ public:
 
     bool isBackgroundSaveProcess() const { return _isBgSaveProcess; }
 
+    static void shutdownBackgroundWatchdog();
+
     /// Save is async, so we need to set 'unmodified' while we are saving
     /// but this can transition back to modified if save fails.
     STATE_ENUM(ModifiedState, Modified, UnModifiedButSaving, UnModified);
@@ -391,13 +426,13 @@ public:
     /// Restore the Document's 'modified' state if necessary
     void updateModifiedOnFailedBgSave();
 
-    /// Let WSD know our true modified state affter bg save success.
+    /// Let WSD know our true modified state after bg save success.
     void notifySyntheticUnmodifiedState();
 
     /// Snoop document modified, and return true if filtering notification
     bool trackDocModifiedState(const std::string &stateChanged);
 
-    /// Permanantly disable background save for this process
+    /// Permanently disable background save for this process
     void disableBgSave(const std::string &reason);
 
     /// Are we currently performing a load ?
@@ -489,7 +524,7 @@ void consistencyCheckJail();
 /// check how many theads we have currently
 int getCurrentThreadCount();
 
-/// Fetch the latest montonically incrementing wire-id
+/// Fetch the latest monotonically incrementing wire-id
 TileWireId getCurrentWireId(bool increment = false);
 
 #ifdef __ANDROID__

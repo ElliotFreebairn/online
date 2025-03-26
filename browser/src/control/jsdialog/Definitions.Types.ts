@@ -27,6 +27,43 @@ interface WidgetJSON {
 	labelledBy?: string;
 }
 
+interface JSBuilderOptions {
+	cssClass: string; // class added to every widget root
+	windowId: number; // window id to be sent with dialogevent
+	map: any; // reference to map
+	mobileWizard: any; // reference to the parent container	FIXME: rename
+	useSetTabs: boolean; // custom tabs placement handled by the parent container
+
+	// modifiers
+	noLabelsForUnoButtons: boolean; // create only icon without label
+	useInLineLabelsForUnoButtons: boolean; // create labels next to the icon
+}
+
+interface JSBuilder {
+	_currentDepth: number; // mobile-wizard only FIXME: encapsulate
+	_controlHandlers: any; // handlers for widget types
+
+	options: JSBuilderOptions; // current state
+	map: any; // reference to map
+	rendersCache: any; // on demand content cache
+
+	build: (
+		parentContainer: Element,
+		data: WidgetJSON[],
+		hasVerticalParent: boolean,
+	) => boolean;
+	updateWidget: (parentContainer: Element, updateJSON: any) => void;
+	executeAction: (parentContainer: Element, actionJSON: any) => void;
+	callback: JSDialogCallback;
+	postProcess: (parentContainer: Element, data: WidgetJSON) => void;
+
+	// helpers FIXME: put as local in Control.Containers.ts
+	_getGridColumns: (data: WidgetJSON[]) => number;
+	_getGridRows: (data: WidgetJSON[]) => number;
+	_preventDocumentLosingFocusOnClick: (container: Element) => void;
+	_expanderHandler: any; // FIXME: use handlers getter instead
+}
+
 interface DialogResponse {
 	id: string;
 	response: number;
@@ -40,7 +77,7 @@ interface DialogJSON extends WidgetJSON {
 // JSDialog message (full, update or action)
 interface JSDialogJSON extends DialogJSON {
 	id: string; // unique windowId
-	jsontype: string; // specifies target componenet, on root level only
+	jsontype: string; // specifies target component, on root level only
 	action?: string; // optional name of an action
 	control?: WidgetJSON;
 }
@@ -65,7 +102,7 @@ type JSDialogCallback = (
 	eventType: string,
 	object: any,
 	data: any,
-	builder: any,
+	builder: JSBuilder,
 ) => void;
 
 // used to define menus
@@ -146,9 +183,10 @@ interface TreeEntryJSON {
 
 interface TreeHeaderJSON {
 	text: string;
+	sortable: boolean; // can be sorted by column
 }
 
-interface TreeWidget extends WidgetJSON {
+interface TreeWidgetJSON extends WidgetJSON {
 	text: string;
 	singleclickactivate: boolean; // activates element on single click instead of just selection
 	fireKeyEvents?: boolean; // do we sent key events to core

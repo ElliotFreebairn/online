@@ -11,7 +11,7 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 		helper.setupAndLoadDocument('writer/annotation.odt');
 		desktopHelper.switchUIToNotebookbar();
 		cy.cGet('#optionscontainer div[id$="SidebarDeck.PropertyDeck"]').click(); // Hide sidebar.
-		selectZoomLevel('50');
+		selectZoomLevel('50', false);
 	});
 
 	it('Insert', function() {
@@ -54,6 +54,22 @@ describe(['tagdesktop'], 'Annotation Tests', function() {
 		cy.cGet('.cool-annotation-menu').click();
 		cy.cGet('body').contains('.context-menu-item', 'Remove').click();
 		cy.cGet('.cool-annotation-content-wrapper').should('not.exist');
+	});
+
+	it('Tab Nevigation', function() {
+		desktopHelper.insertComment(undefined, false);
+
+		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
+		cy.realPress('Tab');
+		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
+		cy.cGet('#annotation-cancel-new:focus-visible');
+
+		cy.realPress('Tab');
+		cy.cGet('#annotation-save-new:focus-visible');
+		cy.cGet('.cool-annotation-autosavelabel').should('be.not.visible');
+
+		cy.realPress('Tab');
+		cy.cGet('.cool-annotation-autosavelabel').should('be.visible');
 	});
 
 });
@@ -151,7 +167,7 @@ describe(['tagdesktop'], 'Annotation Autosave Tests', function() {
 		desktopHelper.switchUIToNotebookbar();
 		// TODO: skip sidebar detection on reload
 		//cy.cGet('#optionscontainer div[id$="SidebarDeck.PropertyDeck"]').click(); // Hide sidebar.
-		selectZoomLevel('50');
+		selectZoomLevel('50', false);
 	});
 
 	it('Insert autosave', function() {
@@ -324,7 +340,7 @@ describe(['tagdesktop'], 'Annotation with @mention', function() {
 		helper.setupAndLoadDocument('writer/annotation.odt');
 		cy.cGet('#optionscontainer div[id$="SidebarDeck.PropertyDeck"]').click(); // Hide sidebar.
 		desktopHelper.switchUIToNotebookbar();
-		selectZoomLevel('50');
+		selectZoomLevel('50', false);
 	});
 
 	it('Insert comment with mention', function() {

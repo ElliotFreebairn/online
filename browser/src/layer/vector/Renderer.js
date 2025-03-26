@@ -1,4 +1,5 @@
 /* -*- js-indent-level: 8 -*- */
+/* global app */
 /*
  * L.Renderer is a base class for renderer implementations (SVG, Canvas);
  * handles renderer container, bounds and zoom animation.
@@ -13,8 +14,11 @@ L.Renderer = L.Layer.extend({
 	},
 
 	initialize: function (options) {
+
+		L.Layer.prototype.initialize.call(this);
+
 		L.setOptions(this, options);
-		L.stamp(this);
+		app.util.stamp(this);
 	},
 
 	setParentRenderer: function (parent) {

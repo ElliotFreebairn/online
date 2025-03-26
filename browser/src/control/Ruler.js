@@ -205,7 +205,7 @@ L.Control.Ruler = L.Control.extend({
 		// update show ruler state on rulerChange event
 		this.options.showruler = this._map.uiManager.getBooleanDocTypePref('ShowRuler', true);
 		if(this.options.showruler) {
-			// in case of disabled ruler at docload calculation of offset can be ignored 
+			// in case of disabled ruler at docload calculation of offset can be ignored
 			// but after enabling the ruler we need to set the offset.
 			this._fixOffset();
 		}
@@ -252,7 +252,7 @@ L.Control.Ruler = L.Control.extend({
 		this.options.rightParagraphIndent = parseFloat(state.right.replace(',', '.')) / conversionFactorToInches ;
 		this.options.indentUnit = state.unit;
 
-		var pxPerMm100 = this._map._docLayer._docPixelSize.x / (this._map._docLayer._docWidthTwips * 2540/1440);
+		var pxPerMm100 = this._map._docLayer._docPixelSize.x / (app.file.size.x * 2540/1440);
 
 		// Conversion to mm100.
 		if (this.options.indentUnit === 'inch') {
@@ -347,7 +347,7 @@ L.Control.Ruler = L.Control.extend({
 		// RULER_TAB_RIGHT, RULER_TAB_CENTER, and RULER_TAB_DECIMAL. See <svtools/ruler.hxx>.
 		L.DomUtil.removeChildNodes(this._rTSContainer);
 
-		var pxPerMm100 = this._map._docLayer._docPixelSize.x / (this._map._docLayer._docWidthTwips * 2540/1440);
+		var pxPerMm100 = this._map._docLayer._docPixelSize.x / (app.file.size.x * 2540/1440);
 		this._rTSContainer.tabStops = [];
 		for (var tabstopIndex = 0; tabstopIndex < this.options.tabs.length; tabstopIndex++) {
 			var markerClass = null;
@@ -418,28 +418,7 @@ L.Control.Ruler = L.Control.extend({
 		if (!this._map.options.docBounds || !this.options.showruler)
 			return;
 
-		var scale = this._map.getZoomScale(this._map.getZoom(), 10);
-		var mapPane = this._map._mapPane;
-		var topLeft = this._map.latLngToLayerPoint(this._map.options.docBounds.getNorthWest());
-		var firstTileXTranslate = topLeft.x;
-
-		var tileContainer = mapPane.getElementsByClassName('leaflet-tile-container');
-		for (var i = 0; i < tileContainer.length; ++i) {
-			if (parseInt(tileContainer[i].style.zIndex) === this._map.getMaxZoom()) {
-				tileContainer = tileContainer[i];
-				break;
-			}
-		}
-		var tileContainerXTranslate = 0;
-		if (tileContainer.style !== undefined)
-			tileContainerXTranslate = parseInt(tileContainer.style.transform.match(/\(([-0-9]*)/)[1]);
-
-		var mapPaneXTranslateMatch = mapPane.style.transform.match(/\(([-0-9]*)/);
-		var mapPaneXTranslate = 0;
-		if (mapPaneXTranslateMatch !== null && mapPaneXTranslateMatch[1] !== undefined)
-			mapPaneXTranslate = parseInt(mapPaneXTranslateMatch[1]);
-
-		var rulerOffset = mapPaneXTranslate + firstTileXTranslate + tileContainerXTranslate + (this.options.tileMargin * scale);
+		const rulerOffset = -app.file.viewedRectangle.cX1 + (this.options.tileMargin * app.getScale());
 
 		this._rFace.style.marginInlineStart = rulerOffset + 'px';
 
